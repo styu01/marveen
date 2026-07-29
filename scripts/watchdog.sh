@@ -118,13 +118,23 @@ PYEOF
 }
 
 # ── Dashboard ──────────────────────────────────────────────────────────────
-DASHBOARD_PID=$(ps -ef | grep "node dist/index.js" | grep -v grep | awk '{print $2}' | head -1)
-if [ -z "$DASHBOARD_PID" ]; then
-  echo "$(timestamp) [watchdog] Dashboard down, restarting..." >> "$LOG"
-  cd "$INSTALL_DIR" && nohup npm start >> "$INSTALL_DIR/logs/dashboard.log" 2>&1 &
+# HTTP ping, not a process-name grep: node always runs via its full NVM path
+# here (e.g. /home/kisss/.nvm/versions/node/v22.23.1/bin/node .../dist/index.js),
+# so a "node dist/index.js" substring grep never matches and falsely triggers
+# a restart (and a doomed EADDRINUSE npm start) every single cycle.
+DASHBOARD_HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 -H "Authorization: Bearer $TOKEN" "http://localhost:${WEB_PORT}/api/agents" 2>/dev/null)
+if [ "$DASHBOARD_HTTP_CODE" != "200" ]; then
+  echo "$(timestamp) [watchdog] Dashboard down (HTTP ${DASHBOARD_HTTP_CODE:-no-response}), restarting..." >> "$LOG"
+  if systemctl --user restart bela-dashboard.service \
+      >> "$INSTALL_DIR/logs/dashboard.log" 2>&1
+  then
+    echo "$(timestamp) [watchdog] systemd dashboard restart requested" >> "$LOG"
+  else
+    echo "$(timestamp) [watchdog] systemd dashboard restart FAILED" >> "$LOG"
+  fi
   sleep 5
-  NEW_PID=$(ps -ef | grep "node dist/index.js" | grep -v grep | awk '{print $2}' | head -1)
-  echo "$(timestamp) [watchdog] Dashboard restarted (PID: ${NEW_PID:-?})" >> "$LOG"
+  NEW_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 -H "Authorization: Bearer $TOKEN" "http://localhost:${WEB_PORT}/api/agents" 2>/dev/null)
+  echo "$(timestamp) [watchdog] Dashboard restart attempted (HTTP ${NEW_CODE:-no-response})" >> "$LOG"
 fi
 
 # ── Main agent session ─────────────────────────────────────────────────────

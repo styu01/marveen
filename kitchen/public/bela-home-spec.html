@@ -1,0 +1,784 @@
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Béla Home – Felhasználói Specifikáció</title>
+<style>
+:root {
+  --bg: #faf9f7;
+  --surface: #ffffff;
+  --surface2: #f0ede8;
+  --border: #e2ddd6;
+  --text: #1c1a17;
+  --muted: #72685c;
+  --accent: #b45309;
+  --accent-light: #fef3c7;
+  --green: #166534;
+  --green-bg: #f0fdf4;
+  --yellow: #92400e;
+  --yellow-bg: #fffbeb;
+  --red: #991b1b;
+  --red-bg: #fef2f2;
+  --blue: #1e40af;
+  --blue-bg: #eff6ff;
+  --radius: 8px;
+  --mono: 'SFMono-Regular', 'Consolas', monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e0d0b;
+    --surface: #191713;
+    --surface2: #231f1a;
+    --border: #342e27;
+    --text: #e8e3dc;
+    --muted: #8a7f72;
+    --accent: #f59e0b;
+    --accent-light: #291f08;
+    --green: #86efac;
+    --green-bg: #052e16;
+    --yellow: #fcd34d;
+    --yellow-bg: #1c1005;
+    --red: #fca5a5;
+    --red-bg: #1f0707;
+    --blue: #93c5fd;
+    --blue-bg: #0c1b3a;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #faf9f7; --surface: #ffffff; --surface2: #f0ede8; --border: #e2ddd6;
+  --text: #1c1a17; --muted: #72685c; --accent: #b45309; --accent-light: #fef3c7;
+  --green: #166534; --green-bg: #f0fdf4; --yellow: #92400e; --yellow-bg: #fffbeb;
+  --red: #991b1b; --red-bg: #fef2f2; --blue: #1e40af; --blue-bg: #eff6ff;
+}
+:root[data-theme="dark"] {
+  --bg: #0e0d0b; --surface: #191713; --surface2: #231f1a; --border: #342e27;
+  --text: #e8e3dc; --muted: #8a7f72; --accent: #f59e0b; --accent-light: #291f08;
+  --green: #86efac; --green-bg: #052e16; --yellow: #fcd34d; --yellow-bg: #1c1005;
+  --red: #fca5a5; --red-bg: #1f0707; --blue: #93c5fd; --blue-bg: #0c1b3a;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 15px;
+  line-height: 1.7;
+  padding: 32px 16px 80px;
+}
+.doc { max-width: 840px; margin: 0 auto; }
+
+.doc-header { border-bottom: 2px solid var(--accent); padding-bottom: 24px; margin-bottom: 36px; }
+.doc-eyebrow { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); margin-bottom: 8px; }
+.doc-title { font-size: clamp(22px, 4.5vw, 34px); font-weight: 700; color: var(--text); line-height: 1.2; text-wrap: balance; margin-bottom: 12px; }
+.doc-authors { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.author-chip { font-size: 12px; background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 3px 12px; }
+.doc-meta { font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; }
+.doc-meta span::before { content: '· '; }
+.doc-meta span:first-child::before { content: ''; }
+
+.toc { background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius); padding: 20px 24px; margin-bottom: 40px; }
+.toc-title { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
+.toc ol { padding-left: 20px; }
+.toc li { margin: 4px 0; font-size: 14px; }
+.toc a { color: var(--accent); text-decoration: none; }
+.toc a:hover { text-decoration: underline; }
+
+.section { margin-bottom: 52px; }
+.section-title { font-size: 19px; font-weight: 700; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+.section-num { background: var(--accent); color: #fff; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; flex-shrink: 0; }
+
+.fn-grid { display: flex; flex-direction: column; gap: 18px; }
+.fn-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.fn-header { display: flex; align-items: center; justify-content: space-between; padding: 13px 18px; background: var(--surface2); border-bottom: 1px solid var(--border); gap: 12px; flex-wrap: wrap; }
+.fn-name { font-weight: 600; font-size: 15px; }
+.fn-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px; }
+.badge-ok    { background: var(--green-bg); color: var(--green); }
+.badge-warn  { background: var(--yellow-bg); color: var(--yellow); }
+.badge-crit  { background: var(--red-bg); color: var(--red); }
+.badge-new   { background: var(--blue-bg); color: var(--blue); }
+.badge-user  { background: var(--accent-light); color: var(--accent); }
+.fn-body { padding: 18px; }
+.fn-row { margin-bottom: 14px; }
+.fn-row:last-child { margin-bottom: 0; }
+.fn-label { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+.fn-value { font-size: 14px; line-height: 1.6; }
+.fn-value ul, .fn-value ol { padding-left: 18px; margin-top: 4px; }
+.fn-value li { margin: 3px 0; }
+.fn-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 580px) { .fn-cols { grid-template-columns: 1fr; } }
+
+.user-matrix { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.user-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.user-avatar { font-size: 26px; margin-bottom: 8px; }
+.user-name { font-weight: 600; font-size: 14px; margin-bottom: 2px; }
+.user-role { font-size: 11px; color: var(--muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.8px; }
+.user-use { font-size: 13px; line-height: 1.55; }
+.user-use li { list-style: none; margin: 3px 0; }
+.user-use li::before { content: '→ '; color: var(--accent); }
+
+.priority-grid { display: grid; grid-template-columns: auto 1fr auto; gap: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; font-size: 14px; margin-bottom: 16px; }
+.pg-head { background: var(--surface2); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); padding: 10px 14px; font-weight: 600; }
+.pg-row > div { padding: 11px 14px; border-top: 1px solid var(--border); display: flex; align-items: flex-start; gap: 8px; }
+.pg-row:hover > div { background: var(--surface2); }
+@media (max-width: 600px) { .priority-grid { grid-template-columns: auto 1fr; } .priority-grid .pg-head:last-child, .priority-grid .pg-row > div:last-child { display: none; } }
+
+.bug-list { display: flex; flex-direction: column; gap: 8px; }
+.bug-item { display: flex; gap: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; align-items: flex-start; }
+.bug-sev { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+.bug-text { font-size: 14px; line-height: 1.5; }
+.bug-fix { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.bug-fix strong { color: var(--text); }
+
+.roadmap { display: flex; flex-direction: column; gap: 18px; }
+.rm-phase { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.rm-header { padding: 12px 18px; background: var(--surface2); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; }
+.rm-timeline { font-size: 12px; color: var(--muted); margin-left: auto; }
+.rm-items { padding: 14px 18px; }
+.rm-items ul { padding-left: 18px; }
+.rm-items li { margin: 6px 0; font-size: 14px; }
+.rm-items li strong { color: var(--accent); }
+
+.compare-wrap { overflow-x: auto; }
+.compare-wrap table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 500px; }
+.compare-wrap th { background: var(--surface2); padding: 10px 14px; text-align: left; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); border-bottom: 2px solid var(--border); }
+.compare-wrap td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; line-height: 1.5; }
+.compare-wrap tr:last-child td { border-bottom: none; }
+.compare-wrap tr:hover td { background: var(--surface2); }
+.c-yes { color: var(--green); font-weight: 600; }
+.c-no  { color: var(--red); }
+.c-part { color: var(--yellow); }
+
+.callout { background: var(--accent-light); border-left: 3px solid var(--accent); border-radius: 0 var(--radius) var(--radius) 0; padding: 14px 18px; font-size: 14px; margin: 16px 0; }
+.callout strong { color: var(--accent); }
+
+.okoska-insight { background: var(--blue-bg); border-left: 3px solid var(--blue); border-radius: 0 var(--radius) var(--radius) 0; padding: 12px 16px; font-size: 13px; margin: 12px 0; }
+.okoska-label { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--blue); margin-bottom: 4px; font-weight: 700; }
+
+h3 { font-size: 15px; font-weight: 600; margin: 20px 0 10px; }
+p { margin-bottom: 12px; font-size: 14px; }
+code { font-family: var(--mono); font-size: 12px; background: var(--surface2); padding: 1px 5px; border-radius: 3px; }
+ul.plain { padding-left: 18px; font-size: 14px; line-height: 1.8; }
+ul.plain li { margin: 4px 0; }
+</style>
+
+<div class="doc">
+
+  <header class="doc-header">
+    <div class="doc-eyebrow">Belső termékdokumentum</div>
+    <h1 class="doc-title">Béla Home — Konyhai AI Asszisztens<br>Felhasználói Specifikáció v1.1</h1>
+    <div class="doc-authors">
+      <span class="author-chip">🤖 BÉLA — technikai rész</span>
+      <span class="author-chip">✨ OKOSKA — UX és stratégia</span>
+    </div>
+    <div class="doc-meta">
+      <span>v1.0: 2026. július 23. délelőtt</span>
+      <span>v1.1 frissítés: 2026. július 23. este -- a v1.0 azonnali roadmap tétele nagy része leszállítva</span>
+      <span>Kiss Istvan számára</span>
+      <span>Bizalmas</span>
+    </div>
+  </header>
+
+  <div class="callout">
+    <strong>Mi változott v1.0 óta (ugyanaznap):</strong> a v1.0-ban felsorolt "Azonnali" roadmap 8 tételéből 7 készen van -- timer localStorage perzisztencia, naptár visszajelzés a short válaszban, Settings panel (hang/email/város/Resend kulcs), kitchen-profile.json + 4 profil (Istvan/Erika/Ádám/Viktória), chat history localStorage, bevásárlólista email (Resend), BÉLA-hangú hibaüzenetek (timeout/offline/általános hiba). Emellett bónuszként bevásárlólista AI-kategorizálás (emoji per tétel) és wake-word auto-greet is megérkezett. Részletek lentebb, zöld "Működik" jelöléssel.
+  </div>
+
+  <nav class="toc">
+    <div class="toc-title">Tartalom</div>
+    <ol>
+      <li><a href="#context">Célkitűzés és kontextus</a></li>
+      <li><a href="#users">Felhasználók és forgatókönyvek</a></li>
+      <li><a href="#functions">Funkciók értékelése</a></li>
+      <li><a href="#memory">Memória és perzisztencia</a></li>
+      <li><a href="#ux">UX: szétszórtság és fókusz</a></li>
+      <li><a href="#bugs">Hibák és kockázatok</a></li>
+      <li><a href="#roadmap">Fejlesztési roadmap</a></li>
+      <li><a href="#compare">Versenyképességi összehasonlítás</a></li>
+    </ol>
+  </nav>
+
+  <section class="section" id="context">
+    <h2 class="section-title"><span class="section-num">01</span> Célkitűzés és kontextus</h2>
+    <p>A Béla Home egy személyre szabott konyhai AI asszisztens, amely a Kiss família mindennapi konyhai életét segíti. A rendszer egy lokális WSL2 szerveren fut (Node.js/Express, port 3421), és tablet böngészőn érhető el a home WiFi-n. A chat mögött OpenAI API dolgozik (Whisper STT, gpt-4o-mini, TTS), de az adatok és a konfiguráció a saját gépen maradnak.</p>
+    <div class="callout">
+      <strong>A Béla Home nem generikus AI.</strong> Tudja ki Istvan, ismeri a Kiss família naptárát és kontextusát, direktbe kapcsolódik a BÉLA rendszerhez. Egyetlen kereskedelmi asszisztens sem tud ilyet reprodukálni — erre kell a fejlesztési fókuszt helyezni, nem a nyers hangfelismerési versenyre az Amazon/Google hardverével szemben.
+    </div>
+    <p>Istvan visszajelzése szerint az alkalmazás "szétszórt" — ez a dokumentum azt célozza, hogy minden funkció célja, működése, hiányossága és fejlesztési potenciálja átgondolt legyen. Szerzők: BÉLA (technikai elemzés) + OKOSKA (UX és stratégia).</p>
+  </section>
+
+  <section class="section" id="users">
+    <h2 class="section-title"><span class="section-num">02</span> Felhasználók és forgatókönyvek</h2>
+
+    <div class="user-matrix">
+      <div class="user-card">
+        <div class="user-avatar">👨‍💼</div>
+        <div class="user-name">Kiss Istvan</div>
+        <div class="user-role">Elsődleges</div>
+        <ul class="user-use">
+          <li>Reggeli briefing kávé mellett</li>
+          <li>Kérdések este, vacsora közben</li>
+          <li>Naptárba diktálás hétvégén</li>
+          <li>AI kérdések, emlékeztetők</li>
+        </ul>
+      </div>
+      <div class="user-card">
+        <div class="user-avatar">👩</div>
+        <div class="user-name">Erika</div>
+        <div class="user-role">Rendszeres</div>
+        <ul class="user-use">
+          <li>Recept főzés közben (kéz foglalt)</li>
+          <li>Időzítők (sütés, párolás)</li>
+          <li>Bevásárlólista kezelése</li>
+          <li>Email küldési cél a listánál</li>
+        </ul>
+      </div>
+      <div class="user-card">
+        <div class="user-avatar">🧒</div>
+        <div class="user-name">Ádám &amp; Viktória</div>
+        <div class="user-role">Alkalmi</div>
+        <ul class="user-use">
+          <li>Időzítők (házi feladat, pomodoro)</li>
+          <li>Wake word — "játékos" interakció</li>
+          <li>Időjárás kérdezés</li>
+          <li>Bevásárlólista olvasása</li>
+        </ul>
+      </div>
+      <div class="user-card">
+        <div class="user-avatar">🎙</div>
+        <div class="user-name">Vendégek</div>
+        <div class="user-role">Ritka</div>
+        <ul class="user-use">
+          <li>Időjárás</li>
+          <li>Zenéhez kérés</li>
+          <li>Recept ötlet</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>Tipikus napirend</h3>
+    <div class="fn-card" style="border-color:var(--border)">
+      <div class="fn-body">
+        <div class="fn-cols">
+          <div>
+            <div class="fn-label">Reggel 7–8</div>
+            <div class="fn-value">Istvan megnyomja a briefing sávot → BÉLA felolvassa a napi összefoglalót AC/DC zenével. Erika bevásárlólistát ellenőriz.</div>
+          </div>
+          <div>
+            <div class="fn-label">Főzés 12–13, 18–19</div>
+            <div class="fn-value">Erika/Istvan hangon kér receptet, időzítőt állít be. Szabad kéz, csak hang — ez a legfontosabb hands-free use case.</div>
+          </div>
+          <div>
+            <div class="fn-label">Este</div>
+            <div class="fn-value">Istvan naptárba diktál, emlékeztetőket ellenőriz. Gyerekek esetleg pomodoro timert kérnek.</div>
+          </div>
+          <div>
+            <div class="fn-label">Bevásárlás előtt</div>
+            <div class="fn-value">Erika elküldi magának a listát emailben, vagy másolja vágólapra. Ő az elsődleges célpontja az email funkciónak — ezt tisztázni kell Istvannal.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="okoska-insight" style="margin-top:14px">
+      <div class="okoska-label">OKOSKA megjegyzés</div>
+      A gyerekek valószínűleg a legtöbbször fogják véletlenül/szándékosan triggerelni a wake word-öt — ez nem hiba, de UX-ben tervezni kell vele. Ne legyen bosszantóan lassú az aktiválás, ne legyen zavaróan sűrű véletlen trigger hétköznapi konyhai szóváltásból. Whisper gyerekhangon külön érdemes tesztelni.
+    </div>
+  </section>
+
+  <section class="section" id="functions">
+    <h2 class="section-title"><span class="section-num">03</span> Funkciók értékelése</h2>
+
+    <div class="fn-grid">
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">🎤 Hang interface (STT + TTS)</span>
+          <div class="fn-badges"><span class="badge badge-warn">Fejlesztendő</span><span class="badge badge-user">Mindenki</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Jelenlegi működés</div>
+          <div class="fn-value">Push-to-talk: mikrofon gomb → Whisper STT ($0.006/perc) → gpt-4o-mini → OpenAI TTS (onyx, 9 hang választható, localStorage-ban megmarad).</div></div>
+          <div class="fn-row"><div class="fn-label">Problémák</div>
+          <div class="fn-value"><ul>
+            <li>Konyhai háttérzaj (sütés, vízcsap, elszívó) rontja a Whisper pontosságát</li>
+            <li>Push-to-talk nem hands-free — ha mindkét kéz piszkos, nem tudja leállítani</li>
+            <li>Nincs csend-detektálás (auto-stop)</li>
+            <li>STT timeout kezelés hiányzik → UI befagyhat Whisper késésnél</li>
+          </ul></div></div>
+          <div class="fn-row"><div class="fn-label">Javasolt javítás (sprint 2)</div>
+          <div class="fn-value">Voice Activity Detection (VAD): 1.5 másodperc csend után automatikus stop. Könyvtár: <code>@ricky0123/vad-web</code> (böngésző-oldali, ingyenes). Ezzel a felvétel teljesen hands-free lesz.</div></div>
+          <div class="fn-row"><div class="fn-label">Fejlesztési lehetőség</div>
+          <div class="fn-value">Lokális Whisper.cpp a WSL2-n (offline STT, nulla API cost, nem kell internet). ElevenLabs Turbo v2.5 TTS Istvan saját hangjával.</div></div>
+        </div>
+      </div>
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">👂 Ébresztőszó ("Szia Béla")</span>
+          <div class="fn-badges"><span class="badge badge-warn">Fejlesztendő</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Jelenlegi működés</div>
+          <div class="fn-value">Web Speech Recognition API, continuous, hu-HU. Ébresztőszó felismerés után micBtn.click() → felvétel indul. Manuális leállítás szükséges.</div></div>
+          <div class="fn-row"><div class="fn-label">Problémák</div>
+          <div class="fn-value"><ul>
+            <li>Nem igazán hands-free: ébresztő aktivál, de felvétel leállítása nem automatikus</li>
+            <li>Folyamatos Web Speech API futás battery drain tableten</li>
+            <li>iOS Safarín nem működik (Chrome/Android a target platform)</li>
+          </ul></div></div>
+          <div class="fn-row"><div class="fn-label">Javasolt javítás</div>
+          <div class="fn-value">VAD integrációval az ébresztőszó + auto-stop = teljes hands-free folyamat. Chrome/Android tableten tökéletesen fog működni.</div></div>
+          <div class="fn-row"><div class="fn-label">Fejlesztési lehetőség</div>
+          <div class="fn-value">Picovoice Porcupine: offline wake word, "Hey Béla" egyéni modell edzethető. Nulla API cost, nincs continuous browser API, hosszabb tablet battery.</div></div>
+        </div>
+      </div>
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">💬 Chat és AI válasz</span>
+          <div class="fn-badges"><span class="badge badge-ok">Alapok működnek</span><span class="badge badge-warn">Multi-turn recept hiányzik</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Jelenlegi működés</div>
+          <div class="fn-value">Textarea + Enter, gpt-4o. XSS-védett renderelés (esc() helper). Kettős válasz: rövid (TTS), hosszú (markdown). Chat history <strong>localStorage-ban megmarad</strong> (bela-chat-history, utolsó üzenetek visszatöltve session között). 20s AbortController timeout + BÉLA-hangú hibaüzenet (timeout / offline / általános hiba) -- ez a v1.0-ban még hiányzott, most kész.</div></div>
+          <div class="fn-row"><div class="fn-label">YouTube / link kezelés — MEGCSINÁLVA</div>
+          <div class="fn-value">Markdown renderer <code>[szöveg](url)</code> felismerést kapott, YouTube linkek "▶ YouTube" feliratú kattintható linkként jelennek meg, más URL is klikkelhető. In-app viewer nyitja meg (nem külső tab), YouTube esetén embed nézetben — ez enyhén eltér az eredeti "csak sima link" kéréstől, érdemes megnézni élőben hogy Istvan szerint ez jó-e vagy tényleg sima linket akar autoplay nélkül.</div></div>
+          <div class="fn-row"><div class="fn-label">Multi-turn recept mód (még nincs)</div>
+          <div class="fn-value">Főzés közben hasznosabb lenne "lépésről lépésre" mód: a felhasználó mondja "kész, mi a következő?" és BÉLA csak az aktuális lépést mondja hangosan. Piszkos kézzel is követhető, nincs hosszú szöveget olvasni. Nincs a kanban-on -- ha kell, ezt fel kell venni külön feladatnak.</div></div>
+        </div>
+      </div>
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">🌡 Időjárás widget</span>
+          <div class="fn-badges"><span class="badge badge-ok">Működik</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Jelenlegi működés</div>
+          <div class="fn-value">wttr.in API, 3 napos előrejelzés, 10 percenként frissül. Chat kérdésnél szerver injektálja az aktuális adatot a gpt-4o-mini system promptba.</div></div>
+          <div class="fn-row"><div class="fn-label">Problémák</div>
+          <div class="fn-value">Budapest hardcoded. wttr.in megbízhatatlan, nincs fallback. UV index, pollen count hiányzik.</div></div>
+          <div class="fn-row"><div class="fn-label">Fejlesztési lehetőség</div>
+          <div class="fn-value">Settings panelban beállítható város (nyaraláshoz). Open-Meteo fallback API (ingyenes, megbízhatóbb).</div></div>
+        </div>
+      </div>
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">⏱ Időzítők</span>
+          <div class="fn-badges"><span class="badge badge-ok">Kritikus hiba javítva</span><span class="badge badge-user">Erika · főzés</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Jelenlegi működés</div>
+          <div class="fn-value">Preset gombok (1/2/3/5/10 perc, összeadódnak), hang aktiválható ("tegyél 10 perces időzítőt"), több timer egyszerre. Lejáratnál zene szól amíg nincs nyugtázva (Oké, vettem gomb) + vibrálás. Bal sáv, saját szekció.</div></div>
+          <div class="fn-row"><div class="fn-label">Korábbi kritikus hiba — JAVÍTVA</div>
+          <div class="fn-value"><strong>localStorage perzisztencia kész</strong> (<code>bela-timers</code>: endMs + label + preset összeg). Oldal frissítésnél a timer visszaáll, nem vész el.</div></div>
+          <div class="fn-row"><div class="fn-label">Maradék hiányosság</div>
+          <div class="fn-value">Ha a tablet elaludt (screen off / böngésző háttérben), a JS timer nem fut tovább pontosan -- Service Worker + Web Push Notification lenne a megbízható megoldás, ez még nincs meg. Sprint 2-es tétel, ld. roadmap.</div></div>
+        </div>
+      </div>
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">🔔 Emlékeztetők</span>
+          <div class="fn-badges"><span class="badge badge-warn">Fejlesztendő</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Jelenlegi működés</div>
+          <div class="fn-value">Szerver oldalon (kitchen-reminders.json), CRUD API, 60 másodperces polling. AI chat-ból hozható létre: "emlékeztess 5-re hogy hívjam fel Erikát".</div></div>
+          <div class="fn-row"><div class="fn-label">Problémák</div>
+          <div class="fn-value"><ul>
+            <li>Tablet sleep: a polling nem fut → elmulasztja az időpontot</li>
+            <li>Nincs ismétlő emlékeztető ("minden hétfőn reggel: bevásárlólista")</li>
+          </ul></div></div>
+          <div class="fn-row"><div class="fn-label">Fix</div>
+          <div class="fn-value">Service Worker Notification API. <code>recurrence: "daily"|"weekly"</code> mező. BÉLA is tud Telegram-ból emlékeztetőt felveni a konyhai JSON-ba.</div></div>
+        </div>
+      </div>
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">🛒 Bevásárlólista</span>
+          <div class="fn-badges"><span class="badge badge-warn">Email + kategorizálás kész, szinkron még nem</span><span class="badge badge-user">Erika · elsősorban</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Jelenlegi működés</div>
+          <div class="fn-value">localStorage-ban él. Add/toggle/remove, tételenként automatikus emoji (🥛 tej, 🍗 hús, 🍅 paradicsom, stb. -- kb 25 kulcsszavas szabály). 📋 vágólapra másolás, 📧 email gomb (Resend API-n keresztül, kulcs Settings panelból beállítható, cím is konfigurálható).</div></div>
+          <div class="fn-row"><div class="fn-label">Email cím — MEGVAN a döntés</div>
+          <div class="fn-value">Alapértelmezett: <code>styu01@gmail.com</code> (Istvan). Settings panelban bárki átírhatja Erikára vagy másra tetszés szerint.</div></div>
+          <div class="fn-row"><div class="fn-label">Nyitott probléma — még nem javítva</div>
+          <div class="fn-value"><strong>Még mindig localStorage: törékeny.</strong> Cache törlés vagy más eszköz (Erika telefonja) esetén elvész, üres lista. Ha más eszközről is nyitják, nem szinkronizál — inkonzisztens listát látnak. Ez volt a v1.0 "Sprint 2" tétele, még nincs leszállítva.</div></div>
+          <div class="fn-row"><div class="fn-label">Fix (Sprint 2, még nyitott)</div>
+          <div class="fn-value">Szerver oldalra (kitchen-shopping.json), minden eszközön szinkronizált lista.</div></div>
+          <div class="fn-row"><div class="fn-label">Fejlesztési lehetőség</div>
+          <div class="fn-value">Kamera barcode scanner. "Szokásos hétvégi lista" sablon egy kattintással. Google Keep / Notion exportálás.</div></div>
+        </div>
+      </div>
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">🌅 Reggeli briefing</span>
+          <div class="fn-badges"><span class="badge badge-ok">Működik</span><span class="badge badge-warn">Fallback hiányzik</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Jelenlegi működés</div>
+          <div class="fn-value">BÉLA 07:30-kor generálja (időjárás + naptár + emlékeztetők) → kitchen-briefing.json → kattintásra TTS felolvasás, AC/DC Back in Black háttérzenével. 18 óra után lejár.</div></div>
+          <div class="fn-row"><div class="fn-label">Problémák</div>
+          <div class="fn-value"><ul>
+            <li>Ha BÉLA nem futott reggel: üres briefing, semmi nem jelenik meg</li>
+            <li>Mindig Back in Black — idővel unalmassá válik</li>
+          </ul></div></div>
+          <div class="fn-row"><div class="fn-label">Fix</div>
+          <div class="fn-value">Fallback: ha nincs JSON, konyhai szerver live lekéri az időjárást és generikus szöveget ad. Lejárat 22 óra. Zenék Settings panelban: AC/DC / Rolling Stones / Queen / kikapcs.</div></div>
+        </div>
+      </div>
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">📅 Naptár integráció</span>
+          <div class="fn-badges"><span class="badge badge-ok">Visszajelzés kész</span><span class="badge badge-warn">Max 30 perc késleltetés</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Jelenlegi működés</div>
+          <div class="fn-value">Chat: "vedd fel a naptárba csütörtökre 10-re a fogorvost" → kitchen-calendar-requests.json → BÉLA heartbeat (max 30 perc) feldolgozza → Google Naptárba kerül.</div></div>
+          <div class="fn-row"><div class="fn-label">Visszajelzés — MEGCSINÁLVA</div>
+          <div class="fn-value">A rendszerprompt most kötelezővé teszi, hogy a "short" válasz visszaismételje a konkrét, kiszámolt dátumot ("csütörtökön, július 24-én 10 órára felvettem a fogorvost"). A modell a mai valós dátum alapján számol, ISO formátumban tárol. A félreértés így azonnal kiderül, nem kell megvárni a heartbeat-et.</div></div>
+          <div class="fn-row"><div class="fn-label">Maradék korlát</div>
+          <div class="fn-value">A tényleges Google Naptárba írás még mindig a heartbeat-re (max 30 perc) vár -- a visszajelzés csak az értelmezést igazolja, nem a felvétel megtörténtét.</div></div>
+          <div class="fn-row"><div class="fn-label">Fejlesztési lehetőség</div>
+          <div class="fn-value">Google Calendar direct API OAuth token fájlból — azonnali felvétel, nem kell a heartbeat-re várni.</div></div>
+        </div>
+      </div>
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">🍳 Recept funkció</span>
+          <div class="fn-badges"><span class="badge badge-warn">Hallucináció kockázat</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Jelenlegi működés</div>
+          <div class="fn-value">Chat kérdés → gpt-4o-mini → recept kártya (hozzávalók + lépések). TheMealDB-ből valódi link injektálva HU→EN fordítási szótárral (csirke→chicken stb.).</div></div>
+          <div class="fn-row"><div class="fn-label">Problémák</div>
+          <div class="fn-value"><ul>
+            <li>TheMealDB angol — ~20 szós szótár, sok magyar étel hiányzik</li>
+            <li>Ha TheMealDB nem ismeri: a modell hajlamos kitalálni a linket</li>
+            <li>Nincs "hűtő-alapú" recept: "tojás + sajt + paprika → mit csináljak?"</li>
+          </ul></div></div>
+          <div class="fn-row"><div class="fn-label">Fejlesztési lehetőség</div>
+          <div class="fn-value">Magyar receptadatbázis (Nosalty.hu scraper/RSS). Hűtő-inventory mező a profilban → vacsorajavaslat amit valóban meg lehet csinálni. Hozzávalók → bevásárlólistára automatikus gomb.</div></div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section class="section" id="memory">
+    <h2 class="section-title"><span class="section-num">04</span> Memória és perzisztencia</h2>
+
+    <div class="callout">
+      <strong>Istvan kérése: "legyen memóriája."</strong> Ez az, ami a Béla Home-ot ténylegesen megkülönbözteti egy Alexa-tól: a Kiss-specifikus hosszú távú kontextus. Nem kell komplex motor — egy jól felépített JSON fájl elég kezdetnek.
+    </div>
+
+    <div class="fn-grid">
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">Személyes profil — kitchen-profiles.json</span>
+          <div class="fn-badges"><span class="badge badge-ok">Kész</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Mit tartalmaz</div>
+          <div class="fn-value">4 profil: Istvan (kedvenc ételek: gulyás, rántott hús, pörkölt; fűszeres ételek szeretete), Erika (laktózmentes diéta), Ádám (mogyoró allergia), Viktória (kedvenc étel: palacsinta). Mezők: kedvenc_etelek, kedvenc_alapanyagok, allergenek, dieta, megjegyzes.</div></div>
+          <div class="fn-row"><div class="fn-label">Megvalósítás — LESZÁLLÍTVA</div>
+          <div class="fn-value"><code>store/kitchen-profiles.json</code>, szerver oldali CRUD API (<code>GET/POST /api/profile/:person</code>). Kliens oldalon személyválasztó gomb (currentPerson), minden <code>/api/chat</code> hívás a kiválasztott személy profilját injektálja a system promptba.</div></div>
+          <div class="fn-row"><div class="fn-label">Nyitva maradt</div>
+          <div class="fn-value">Nincs saját szerkesztő UI a profilokhoz a Settings panelban -- jelenleg csak API-n vagy a JSON fájl közvetlen szerkesztésével módosítható. Ha kell felhasználói felület hozzá, ez egy külön, kicsi feladat.</div></div>
+        </div>
+      </div>
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">Tanult emlékek — kitchen-memory.json</span>
+          <div class="fn-badges"><span class="badge badge-new">Sprint 2</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Mit tartalmaz</div>
+          <div class="fn-value">Amit a chat során mond a felhasználó és nem volt a profilban: "Sok fokhagymával szeretem a csirkét", "csütörtökönként Erika edzésre jár", "Ádám mostanában sok szendvicset eszik".</div></div>
+          <div class="fn-row"><div class="fn-label">Megvalósítás</div>
+          <div class="fn-value">Kulcs-érték JSON. Ha a modell "megjegyeznivalót" azonosít a válaszban, szerver felírja. System promptba bekerül "Megjegyzett dolgok:" szekcióként. Max 20 tétel, FIFO rotáció.</div></div>
+        </div>
+      </div>
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">Chat history — localStorage</span>
+          <div class="fn-badges"><span class="badge badge-ok">Kész</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Jelenlegi állapot — LESZÁLLÍTVA</div>
+          <div class="fn-value"><code>bela-chat-history</code> localStorage kulcs, üzenetek időbélyeggel, betöltéskor visszatöltve (historyRestore mód, extra-kártyák nem duplikálódnak visszatöltésnél).</div></div>
+          <div class="fn-row"><div class="fn-label">Pontosítás</div>
+          <div class="fn-value">"Chat törlése" gomb létezik, de a gyors gombok sorában van, nem a chat fejlécben (🗑 Chat törlése a quick-btns között).</div></div>
+        </div>
+      </div>
+
+      <div class="fn-card">
+        <div class="fn-header">
+          <span class="fn-name">BÉLA ↔ Kitchen mély szinkron</span>
+          <div class="fn-badges"><span class="badge badge-new">Jövőbeli</span></div>
+        </div>
+        <div class="fn-body">
+          <div class="fn-row"><div class="fn-label">Koncepció</div>
+          <div class="fn-value">BÉLA teljes memória rendszere (hot/warm/cold) tartalmaz Istvanra vonatkozó infókat. BÉLA reggel összefoglalja és beleírja a kitchen-briefing.json-ba, így a konyha "tudja" ami BÉLA tud — ez a mélyesen személyre szabott élmény alapja.</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="ux">
+    <h2 class="section-title"><span class="section-num">05</span> UX: szétszórtság és fókusz</h2>
+
+    <div class="okoska-insight">
+      <div class="okoska-label">OKOSKA elemzés</div>
+      A "szétszórtság" abból fakad, hogy a jelenlegi UI egyenrangúan mutat mindent (időjárás, időzítő, emlékeztető, bevásárlólista, chat) anélkül, hogy lenne napszak-függő fókusz. Ez nem új funkció kérdése — meglévő elemek hangsúly-átrendezése olcsó fejlesztés, nagy UX-hatás.
+    </div>
+
+    <h3>Kontextuális hangsúly napszak szerint</h3>
+    <div class="priority-grid">
+      <div class="pg-head">Napszak</div>
+      <div class="pg-head">Kiemelt elem</div>
+      <div class="pg-head">Logika</div>
+      <div class="pg-row">
+        <div>☀️ 6–9</div>
+        <div><strong>Reggeli briefing</strong> — nagyobb, feltűnőbb</div>
+        <div>Istvan napi rutin</div>
+      </div>
+      <div class="pg-row">
+        <div>🍳 11–13, 17–20</div>
+        <div><strong>Időzítők + recept</strong> — első helyen</div>
+        <div>Főzési idő, kéz foglalt</div>
+      </div>
+      <div class="pg-row">
+        <div>🛒 Ha >3 tétel</div>
+        <div><strong>Bevásárlólista</strong> emlékeztető sáv</div>
+        <div>Megmaradt tételek jelzése</div>
+      </div>
+      <div class="pg-row">
+        <div>🌙 20–23</div>
+        <div><strong>Másnapi naptár</strong> + emlékeztetők</div>
+        <div>Este tervezés, diktálás</div>
+      </div>
+    </div>
+
+    <h3>Hibaüzenetek — BÉLA-hangnem — KÉSZ</h3>
+    <p>Leszállítva: 20 másodperces AbortController timeout, BÉLA-hangú üzenettel ("Elakadtam egy pillanatra. Az agyam 0.01%-a sztrájkol. Próbáld újra."), külön ág offline állapotra (<code>navigator.onLine === false</code>: "Nincs internet. Timer, emlékeztető, bevásárlólista működik.") és külön ág általános hibára.</p>
+
+    <h3>Naptár visszajelzés — KÉSZ</h3>
+    <p>A rendszerprompt kötelezővé teszi, hogy a chat "short" válasz visszaismételje az értelmezett konkrét dátumot, a valós mai nap alapján kiszámolva. Ez azonnal detektálhatóvá teszi a félreértéseket, nem kell a heartbeat-re várni az ellenőrzéshez.</p>
+
+    <h3>Proaktivitás (jövőbeli funkció)</h3>
+    <div class="okoska-insight">
+      <div class="okoska-label">OKOSKA javaslat</div>
+      Jelenleg a rendszer teljesen reaktív. Egy igazán komplex asszisztens proaktívan szólna: "10 perc múlva lejár az időzítő, közben felolvasom a következő lépést?" vagy "Látom, hogy tejtermék van a bevásárlólistán, emlékeztetlek: ma zárva a közeli bolt." Nem bonyolult — az emlékeztetők és timer mintájából kiterjeszthető.
+    </div>
+
+    <h3>Settings panel — KÉSZ</h3>
+    <ul class="plain">
+      <li>✅ ⚙️ Fogaskerék ikon, jobb felső sarok</li>
+      <li>✅ Értesítési email: bevásárlólista küldési cím (default: styu01@gmail.com), Settings-ben szerkeszthető</li>
+      <li>✅ Város: időjárás helyszíne (default: Budapest), Settings-ben szerkeszthető</li>
+      <li>✅ Resend API kulcs beállítás (jelszó-mezőben, sosem jelenik meg vissza)</li>
+      <li>◻ Hang: TTS hang választó (onyx, nova, fable...) — még nincs a Settings panelban, csak kód szinten cserélhető</li>
+      <li>◻ Profil szerkesztő UI (allergének, diéta) — a profilok léteznek (kitchen-profiles.json), de nincs hozzá felület</li>
+      <li>◻ Briefing zene választó (AC/DC / Rolling Stones / Queen / kikapcs) — még mindig fixen Back in Black</li>
+    </ul>
+  </section>
+
+  <section class="section" id="bugs">
+    <h2 class="section-title"><span class="section-num">06</span> Ismert hibák és kockázatok</h2>
+
+    <p style="margin-bottom:16px"><strong>Javítva a v1.0 óta:</strong> timer localStorage, naptár visszajelzés, chat timeout + BÉLA-hangú hibaüzenetek (timeout + offline ág), bevásárlólista email + Settings. Lent csak a <strong>még nyitott</strong> tételek.</p>
+    <div class="bug-list">
+      <div class="bug-item">
+        <div class="bug-sev">🔴</div>
+        <div class="bug-text">
+          <strong>Bevásárlólista localStorage: cache törlés vagy más eszköz = elvész</strong>, nem szinkronizál eszközök között
+          <div class="bug-fix"><strong>Fix:</strong> Szerver oldalra (kitchen-shopping.json). Sprint 2, még nyitott.</div>
+        </div>
+      </div>
+      <div class="bug-item">
+        <div class="bug-sev">🔴</div>
+        <div class="bug-text">
+          <strong>Tablet sleep esetén timer/emlékeztető nem szól lejáratnál</strong> — a JS-alapú timer és a 60s-os polling háttérben leáll
+          <div class="bug-fix"><strong>Fix:</strong> Service Worker + Web Push Notification API. Sprint 2, még nyitott.</div>
+        </div>
+      </div>
+      <div class="bug-item">
+        <div class="bug-sev">🟡</div>
+        <div class="bug-text">
+          <strong>Wake word ("Szia Béla") aktiválás után a felvétel leállítása még manuális</strong> — nincs csend-detektálás (VAD)
+          <div class="bug-fix"><strong>Fix:</strong> Voice Activity Detection, @ricky0123/vad-web. Sprint 2, még nyitott.</div>
+        </div>
+      </div>
+      <div class="bug-item">
+        <div class="bug-sev">🟡</div>
+        <div class="bug-text">
+          <strong>Recept link hallucináció: TheMealDB nem ismeri az ételt → modell kitalálja az URL-t</strong>
+          <div class="bug-fix"><strong>Fix:</strong> Fallback: nosalty.hu keresési URL (mindig érvényes) + "Ellenőrizd a linket" megjegyzés. Még nyitott.</div>
+        </div>
+      </div>
+      <div class="bug-item">
+        <div class="bug-sev">🟡</div>
+        <div class="bug-text">
+          <strong>Reggeli briefing hiányzik ha BÉLA nem futott 07:30-kor</strong>
+          <div class="bug-fix"><strong>Fix:</strong> Live fallback: konyhai szerver self-generálja wttr.in adatból. Még nyitott.</div>
+        </div>
+      </div>
+      <div class="bug-item">
+        <div class="bug-sev">🟢</div>
+        <div class="bug-text">
+          <strong>iOS: AudioContext user gesture nélkül nem indul (briefing zene)</strong>
+          <div class="bug-fix"><strong>Állapot:</strong> .catch() kész, de iOS-en az első kattintásig nincs zene — ezt UI-ban jelezni érdemes. Nem prioritás, tablet Chrome/Android a fő platform.</div>
+        </div>
+      </div>
+      <div class="bug-item">
+        <div class="bug-sev">🟢</div>
+        <div class="bug-text">
+          <strong>In-app viewer YouTube linkeknél embedbe nyit</strong>, nem tisztán külső link — az eredeti kérés "csak kattintható szöveges link, ne autoplay" volt
+          <div class="bug-fix"><strong>Ellenőrizni kell:</strong> Istvannal élőben megnézni, jó-e így, vagy legyen sima <code>target="_blank"</code> link autoplay nélkül.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="roadmap">
+    <h2 class="section-title"><span class="section-num">07</span> Fejlesztési roadmap</h2>
+
+    <div class="roadmap">
+      <div class="rm-phase">
+        <div class="rm-header">✅ Kész <span class="rm-timeline">2026. július 22-23.</span></div>
+        <div class="rm-items"><ul>
+          <li><strong>YouTube link:</strong> kattintható link a chatben (in-app viewer-rel nyílik — érdemes ellenőrizni Istvannal, hogy ez így jó-e)</li>
+          <li><strong>Timer localStorage:</strong> oldal frissítésnél nem vész el; ráadásul preset gombok + nyugtázós riasztó is megérkezett</li>
+          <li><strong>Naptár visszajelzés:</strong> short válasz visszaismétli az értelmezett dátumot</li>
+          <li><strong>Settings panel alap:</strong> email cím, város, Resend kulcs beállítható</li>
+          <li><strong>kitchen-profiles.json:</strong> 4 profil (Istvan/Erika/Ádám/Viktória), allergének/diéta a system promptban</li>
+          <li><strong>Chat history:</strong> localStorage, session-k között megmarad</li>
+          <li><strong>Bevásárlólista email:</strong> Resend kulcs beállítás + konfigurálható cél cím, plusz AI-szerű emoji kategorizálás</li>
+          <li><strong>BÉLA-hangú hibaüzenetek:</strong> timeout (20s), offline, általános hiba -- mindhárom ág külön szöveggel</li>
+        </ul></div>
+      </div>
+
+      <div class="rm-phase">
+        <div class="rm-header">🟡 Sprint 2 <span class="rm-timeline">még nyitott</span></div>
+        <div class="rm-items"><ul>
+          <li><strong>Bevásárlólista szerver oldalon</strong> (kitchen-shopping.json, szinkronizált minden eszközre) — a legnagyobb maradék hiányosság</li>
+          <li><strong>Service Worker + Push Notification</strong> (timer lejárat, emlékeztető — tablet sleep esetén is)</li>
+          <li><strong>VAD auto-stop:</strong> hands-free hang interface (@ricky0123/vad-web) — wake word már auto-indít, de leállítás még manuális</li>
+          <li><strong>Reggeli briefing fallback:</strong> live generálás ha BÉLA nem írta 07:30-kor</li>
+          <li><strong>kitchen-memory.json:</strong> tanult emlékek chat közben, system promptba injektálva</li>
+          <li><strong>Kontextuális UI hangsúly:</strong> napszak-függő elem kiemelés (reggel briefing nagyobb, főzés idején timer+recept elöl)</li>
+          <li><strong>Profil szerkesztő UI:</strong> a profilok API-ban léteznek, de nincs Settings-felület hozzájuk</li>
+          <li><strong>Recept link fallback:</strong> nosalty.hu keresés ha TheMealDB nem ismeri az ételt</li>
+        </ul></div>
+      </div>
+
+      <div class="rm-phase">
+        <div class="rm-header">🟢 Hosszútáv <span class="rm-timeline">1 hónap+</span></div>
+        <div class="rm-items"><ul>
+          <li><strong>ElevenLabs voice cloning:</strong> Istvan hangja (2 perces sample → voice_id)</li>
+          <li><strong>Multi-turn recept mód:</strong> lépésről-lépésre főzés közben, "kész, következő" hangon</li>
+          <li><strong>Screen saver / kiosk mód:</strong> 2 perc inaktivitás → óra + időjárás full screen</li>
+          <li><strong>Barcode scanner:</strong> kamera → EAN → termék neve a bevásárlólistára</li>
+          <li><strong>Magyar receptadatbázis:</strong> Nosalty.hu vagy Mindmegette.hu scraper</li>
+          <li><strong>Google Calendar direct API:</strong> OAuth token, azonnali felvétel visszajelzéssel</li>
+          <li><strong>Offline PWA:</strong> Service Worker cache, internet nélkül is alap funkciók</li>
+          <li><strong>Picovoice Porcupine:</strong> offline wake word "Hey Béla" egyéni modell</li>
+          <li><strong>Proaktivitás:</strong> "10 perc múlva lejár, olvassam a következő lépést?" típusú kezdeményezések</li>
+          <li><strong>BÉLA ↔ Kitchen mély szinkron:</strong> BÉLA warm memória → briefing kontextus integráció</li>
+        </ul></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="compare">
+    <h2 class="section-title"><span class="section-num">08</span> Versenyképességi összehasonlítás</h2>
+
+    <div class="compare-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Szempont</th>
+            <th>Béla Home</th>
+            <th>Amazon Echo</th>
+            <th>Google Nest Hub</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Magyar nyelv (natív)</td>
+            <td class="c-yes">✓ Natív, Whisper+GPT</td>
+            <td class="c-no">✗ Nincs natív HU</td>
+            <td class="c-part">Részleges, gépies</td>
+          </tr>
+          <tr>
+            <td>Kiss-família személyes kontextus</td>
+            <td class="c-yes">✓ Teljes BÉLA integráció</td>
+            <td class="c-no">✗</td>
+            <td class="c-no">✗</td>
+          </tr>
+          <tr>
+            <td>Adatvédelem (saját gépen)</td>
+            <td class="c-yes">✓ Lokális szerver</td>
+            <td class="c-no">✗ Amazon cloud</td>
+            <td class="c-no">✗ Google cloud</td>
+          </tr>
+          <tr>
+            <td>Offline wake word</td>
+            <td class="c-no">✗ (roadmap)</td>
+            <td class="c-yes">✓ Mic-array</td>
+            <td class="c-yes">✓ Mic-array</td>
+          </tr>
+          <tr>
+            <td>Zajszűrés fizikai hardveren</td>
+            <td class="c-no">✗ Tablet mic</td>
+            <td class="c-yes">✓ 7 mikrofon</td>
+            <td class="c-yes">✓ 2 mikrofon</td>
+          </tr>
+          <tr>
+            <td>Havi költség</td>
+            <td class="c-yes">~$1–3 (OpenAI API)</td>
+            <td class="c-part">$3.99+ ökoszisztéma</td>
+            <td class="c-part">$2.99+ YouTube</td>
+          </tr>
+          <tr>
+            <td>Saját hang (voice cloning)</td>
+            <td class="c-yes">✓ ElevenLabs-szal</td>
+            <td class="c-no">✗</td>
+            <td class="c-no">✗</td>
+          </tr>
+          <tr>
+            <td>Smart home vezérlés</td>
+            <td class="c-no">✗</td>
+            <td class="c-yes">✓</td>
+            <td class="c-yes">✓</td>
+          </tr>
+          <tr>
+            <td>Szabad fejlesztés (bármilyen funkció)</td>
+            <td class="c-yes">✓ Korlátlan</td>
+            <td class="c-part">Alexa Skills (zárt)</td>
+            <td class="c-no">✗</td>
+          </tr>
+          <tr>
+            <td>Naptár + Email integráció</td>
+            <td class="c-yes">✓ Google MCP</td>
+            <td class="c-part">Korlátolt</td>
+            <td class="c-yes">✓ Google natív</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout" style="margin-top:20px">
+      <strong>Fő tanulság (OKOSKA):</strong> A Béla Home versenyelőnye nem a nyers hangfelismerési minőségben van — az Amazon/Google évek óta finomhangolt hardvere ott jobb. Az előny a <strong>személyre szabottságban és az integráció mélységében</strong> rejlik: a Kiss-família kontextusa, BÉLA memória rendszere, korlátlan fejleszthetőség. Erre kell a fókuszt helyezni.
+    </div>
+  </section>
+
+</div>

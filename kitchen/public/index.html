@@ -1,0 +1,1706 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Béla Home</title>
+<style>
+:root {
+  --bg: #F5F0E8;
+  --surface: #FFFFFF;
+  --surface2: #FBF7EF;
+  --border: #E8DDD0;
+  --text: #2C2416;
+  --muted: #8B7355;
+  --accent: #6B7C45;
+  --accent-dark: #5A6938;
+  --accent2: #C4924A;
+  --green: #6B7C45;
+  --red: #B0413E;
+  --orange: #C4924A;
+  --radius: 16px;
+  --gap: 14px;
+  --shadow: 0 2px 10px rgba(44,36,22,0.08);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 16px;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* ============================================================
+   LAYOUT
+============================================================ */
+#app {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  grid-template-rows: 1fr;
+  gap: var(--gap);
+  padding: var(--gap);
+  height: 100%;
+  overflow: hidden;
+}
+
+@media (max-width: 700px) {
+  #app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+  #left-panel { max-height: 45dvh; overflow-y: auto; }
+}
+
+/* ============================================================
+   LEFT PANEL
+============================================================ */
+#left-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+#left-panel::-webkit-scrollbar { display: none; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  box-shadow: var(--shadow);
+}
+
+/* Clock */
+#clock-card { text-align: center; }
+#clock-time {
+  font-size: clamp(36px, 8vw, 56px);
+  font-weight: 300;
+  letter-spacing: -1px;
+  line-height: 1;
+  color: var(--text);
+}
+#clock-date { font-size: 14px; color: var(--muted); margin-top: 6px; }
+
+/* Person selector */
+.person-btn {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 22px; padding: 10px 16px; font-size: 14px;
+  color: var(--muted); cursor: pointer; transition: all 0.12s;
+  min-height: 44px; display: inline-flex; align-items: center; gap: 4px;
+  font-weight: 500;
+}
+.person-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* Weather */
+#weather-card { }
+.card-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+#weather-main { display: flex; align-items: baseline; gap: 10px; }
+#weather-temp { font-size: 32px; font-weight: 300; color: var(--text); }
+#weather-desc { font-size: 14px; color: var(--muted); }
+#weather-details { font-size: 13px; color: var(--muted); margin-top: 6px; }
+#weather-forecast {
+  display: flex; gap: 6px; margin-top: 12px;
+  border-top: 1px solid var(--border); padding-top: 12px;
+}
+.forecast-day {
+  flex: 1; text-align: center; font-size: 12px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.forecast-day .fd-name { color: var(--muted); }
+.forecast-day .fd-temp { color: var(--text); font-size: 14px; font-weight: 600; }
+.forecast-day .fd-desc { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Timers */
+#timers-card { }
+#timer-presets { display: flex; gap: 6px; margin-bottom: 10px; }
+.preset-btn {
+  flex: 1;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 4px; font-size: 15px; font-weight: 700;
+  color: var(--muted); cursor: pointer; text-align: center;
+  min-height: 44px;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.preset-btn:hover, .preset-btn:active { background: var(--accent); border-color: var(--accent); color: #fff; }
+#timer-pending {
+  display: none; align-items: center; gap: 8px; margin-bottom: 10px;
+  background: rgba(107,124,69,0.12); border: 1px solid var(--accent);
+  border-radius: 10px; padding: 8px 12px;
+}
+#timer-pending-text { flex: 1; font-size: 15px; font-weight: 700; color: var(--accent-dark); }
+.timer-start-btn {
+  background: var(--accent); border: none; border-radius: 8px;
+  padding: 8px 16px; color: #fff; cursor: pointer; font-size: 14px; font-weight: 600;
+  min-height: 40px;
+}
+.timer-clear-btn { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 20px; line-height: 1; padding: 4px 6px; }
+#timers-list { display: flex; flex-direction: column; gap: 8px; }
+.timer-row {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surface2); border-radius: 10px; padding: 10px 14px;
+  font-size: 14px; border: 1px solid var(--border);
+  min-height: 52px;
+}
+.timer-label { flex: 1; color: var(--text); }
+.timer-time { font-size: 16px; font-weight: 600; color: var(--accent-dark); font-variant-numeric: tabular-nums; }
+.timer-row.urgent .timer-time { color: var(--orange); }
+.timer-row.alarm {
+  background: rgba(176,65,62,0.10);
+  border-color: rgba(176,65,62,0.5);
+  animation: alarm-pulse 0.7s infinite alternate;
+}
+@keyframes alarm-pulse {
+  from { border-color: rgba(176,65,62,0.3); background: rgba(176,65,62,0.06); }
+  to   { border-color: rgba(176,65,62,0.9); background: rgba(176,65,62,0.16); }
+}
+.timer-ack-btn {
+  background: var(--green); border: none; border-radius: 8px;
+  padding: 8px 14px; color: #fff; cursor: pointer; font-size: 13px; font-weight: 700;
+  white-space: nowrap; flex-shrink: 0; min-height: 40px;
+}
+.timer-del { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px; padding: 4px 6px; line-height: 1; }
+
+/* Shopping */
+#shopping-card { }
+#shopping-input-row { display: flex; gap: 8px; margin-bottom: 10px; }
+#shopping-input {
+  flex: 1; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 14px; color: var(--text); font-size: 15px;
+  outline: none; min-height: 44px;
+}
+#shopping-input:focus { border-color: var(--accent); }
+#shopping-add {
+  background: var(--accent); border: none; border-radius: 10px;
+  padding: 10px 18px; color: #fff; cursor: pointer; font-size: 20px; font-weight: 700;
+  min-width: 48px; min-height: 44px;
+}
+#shopping-list { display: flex; flex-direction: column; gap: 4px; }
+.shopping-item {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 15px; padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  min-height: 44px;
+}
+.shopping-item:last-child { border-bottom: none; }
+.shopping-item.done .si-text { text-decoration: line-through; color: var(--muted); }
+.si-icon { font-size: 18px; flex-shrink: 0; }
+.si-check {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid var(--border); cursor: pointer; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.shopping-item.done .si-check { background: var(--green); border-color: var(--green); }
+.si-text { flex: 1; }
+.si-del { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px; padding: 4px; }
+#shopping-empty { font-size: 13px; color: var(--muted); }
+
+/* ============================================================
+   RIGHT PANEL
+============================================================ */
+#right-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* Chat area */
+#chat-area {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  user-select: text;
+  gap: 16px;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+#chat-placeholder { color: var(--muted); font-size: 15px; margin: auto; text-align: center; line-height: 1.8; }
+
+/* Message bubbles */
+.msg { display: flex; flex-direction: column; gap: 6px; max-width: 100%; }
+.msg-user { align-items: flex-end; }
+.msg-bela { flex-direction: row; align-items: flex-start; gap: 10px; }
+
+.bela-avatar {
+  width: 36px; height: 36px; border-radius: 50%;
+  background: var(--accent); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; flex-shrink: 0;
+}
+
+.bela-content {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+
+.bubble-user {
+  background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+  color: #fff;
+  padding: 12px 16px;
+  border-radius: 18px 18px 4px 18px;
+  font-size: 16px; line-height: 1.5;
+  max-width: 80%;
+}
+
+.bubble-short {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 12px 16px;
+  border-radius: 4px 18px 18px 18px;
+  font-size: 16px; line-height: 1.5;
+  max-width: 90%;
+  font-style: italic;
+}
+
+.bubble-long {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  font-size: 16px; line-height: 1.7;
+  max-width: 100%;
+  width: 100%;
+}
+.bubble-long h1, .bubble-long h2, .bubble-long h3 {
+  font-size: 17px; font-weight: 700; margin: 8px 0 4px; color: var(--accent-dark);
+}
+.bubble-long ul, .bubble-long ol { padding-left: 22px; margin: 4px 0; }
+.bubble-long li { margin: 4px 0; }
+.bubble-long p { margin: 4px 0; }
+.bubble-long strong { color: var(--text); }
+.bubble-long code { background: var(--bg); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+
+/* Recipe card */
+.recipe-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px;
+  width: 100%;
+  overflow: hidden;
+}
+.recipe-img-placeholder {
+  height: 120px;
+  margin: -16px -16px 14px -16px;
+  background: linear-gradient(135deg, var(--accent), #8FA066);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 44px;
+}
+.recipe-card h3 { font-size: 18px; color: var(--accent-dark); margin-bottom: 12px; }
+.recipe-card h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); font-weight: 700; margin: 12px 0 6px; }
+.recipe-card ul, .recipe-card ol { padding-left: 20px; }
+.recipe-card li { margin: 5px 0; font-size: 15px; line-height: 1.5; }
+
+/* ============================================================
+   QUICK ACTIONS
+============================================================ */
+#quick-btns {
+  display: flex; gap: 8px; flex-wrap: wrap; flex-shrink: 0;
+}
+.quick-btn {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 22px; padding: 10px 18px; font-size: 14px;
+  color: var(--text); cursor: pointer; white-space: nowrap;
+  min-height: 48px; display: inline-flex; align-items: center; gap: 6px;
+  font-weight: 500;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.quick-btn:hover, .quick-btn:active { border-color: var(--accent); color: var(--accent-dark); background: var(--surface2); }
+
+/* ============================================================
+   INPUT AREA
+============================================================ */
+#input-area {
+  display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0;
+}
+#text-input {
+  flex: 1;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 18px; padding: 14px 18px;
+  color: var(--text); font-size: 16px; line-height: 1.4;
+  outline: none; resize: none;
+  min-height: 52px; max-height: 120px;
+  font-family: inherit;
+}
+#text-input:focus { border-color: var(--accent); }
+#text-input::placeholder { color: var(--muted); }
+
+#send-btn {
+  width: 52px; height: 52px; border-radius: 50%;
+  background: var(--accent); border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+#send-btn svg { fill: #fff; width: 22px; height: 22px; }
+#send-btn:disabled { opacity: 0.4; pointer-events: none; }
+
+#mic-btn {
+  width: 60px; height: 60px; border-radius: 50%; border: none;
+  background: radial-gradient(circle at 35% 35%, var(--accent), var(--accent-dark));
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 1px var(--border);
+  flex-shrink: 0;
+  transition: transform 0.1s;
+}
+#mic-btn svg { fill: #fff; width: 24px; height: 24px; transition: fill 0.15s; }
+#mic-btn.recording {
+  background: radial-gradient(circle at 35% 35%, #C0524E, var(--red));
+  box-shadow: 0 0 0 8px rgba(176,65,62,0.18), 0 0 0 16px rgba(176,65,62,0.08);
+  animation: mpulse 1.1s infinite;
+}
+#mic-btn.recording svg { fill: #fff; }
+#mic-btn.loading { opacity: 0.4; pointer-events: none; }
+@keyframes mpulse {
+  0%,100% { box-shadow: 0 0 0 8px rgba(176,65,62,0.18), 0 0 0 16px rgba(176,65,62,0.08); }
+  50% { box-shadow: 0 0 0 12px rgba(176,65,62,0.28), 0 0 0 22px rgba(176,65,62,0.05); }
+}
+
+/* Status bar */
+#status {
+  font-size: 13px; color: var(--muted);
+  text-align: center; flex-shrink: 0;
+  min-height: 18px;
+}
+
+/* ============================================================
+   IN-APP VIEWER
+============================================================ */
+#viewer-panel {
+  display: none;
+  flex-direction: column;
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  min-height: 0;
+}
+#right-panel.viewer-active #chat-area { display: none; }
+#right-panel.viewer-active #viewer-panel { display: flex; }
+#viewer-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  flex-shrink: 0; background: var(--surface2);
+}
+#viewer-back-btn {
+  background: none; border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px 14px; color: var(--text); cursor: pointer; font-size: 14px;
+  white-space: nowrap; flex-shrink: 0; min-height: 40px;
+}
+#viewer-back-btn:hover { border-color: var(--accent); color: var(--accent-dark); }
+#viewer-title {
+  flex: 1; font-size: 13px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#viewer-iframe-container { flex: 1; position: relative; min-height: 0; }
+#viewer-iframe { width: 100%; height: 100%; border: none; display: block; background: #fff; }
+#viewer-error {
+  display: none; position: absolute; inset: 0;
+  background: var(--surface2); flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 12px; text-align: center; padding: 24px;
+}
+#viewer-error.visible { display: flex; }
+#viewer-bottom {
+  display: flex; justify-content: center; align-items: center;
+  padding: 12px 16px; border-top: 1px solid var(--border); flex-shrink: 0;
+}
+#viewer-open-browser-btn {
+  background: none; border: 1px solid var(--border); border-radius: 22px;
+  padding: 10px 20px; color: var(--muted); cursor: pointer; font-size: 14px;
+  min-height: 44px;
+  transition: border-color 0.15s, color 0.15s;
+}
+#viewer-open-browser-btn:hover { border-color: var(--accent); color: var(--accent-dark); }
+
+/* ============================================================
+   SETTINGS
+============================================================ */
+#settings-btn {
+  position: fixed; top: 14px; right: 14px; z-index: 50;
+  width: 48px; height: 48px; border-radius: 50%;
+  background: var(--surface); border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  font-size: 20px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+#settings-overlay {
+  display: none; position: fixed; inset: 0; z-index: 100;
+  background: rgba(44,36,22,0.45);
+  align-items: center; justify-content: center;
+  padding: 16px;
+}
+#settings-overlay.open { display: flex; }
+#settings-panel {
+  background: var(--surface); border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  width: min(440px, 100%); max-height: 85vh; overflow-y: auto;
+  padding: 20px;
+}
+#settings-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 16px;
+}
+#settings-header h2 { font-size: 19px; color: var(--text); }
+#settings-close {
+  background: none; border: none; font-size: 22px; color: var(--muted);
+  cursor: pointer; width: 40px; height: 40px;
+}
+.settings-field { margin-bottom: 16px; }
+.settings-field label {
+  display: block; font-size: 13px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+}
+.settings-field input, .settings-field select {
+  width: 100%; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px 14px; font-size: 16px; color: var(--text);
+  outline: none; min-height: 48px; font-family: inherit;
+}
+.settings-field input:focus, .settings-field select:focus { border-color: var(--accent); }
+.settings-hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+#settings-save {
+  width: 100%; background: var(--accent); border: none; border-radius: 12px;
+  padding: 14px; color: #fff; font-size: 16px; font-weight: 700;
+  cursor: pointer; min-height: 52px; margin-top: 4px;
+}
+
+.calendar-confirm-chip {
+  display: inline-block;
+  background: var(--accent); color: #fff;
+  font-size: 12px; border-radius: 12px;
+  padding: 4px 10px; margin-top: 4px;
+}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ======== LEFT PANEL ======== -->
+  <div id="left-panel">
+
+    <div class="card" id="clock-card">
+      <div id="clock-time">--:--</div>
+      <div id="clock-date"></div>
+      <div id="person-selector" style="display:flex;gap:8px;margin-top:12px;justify-content:center;flex-wrap:wrap">
+        <button class="person-btn active" data-person="Istvan" onclick="selectPerson('Istvan',this)">👨‍💼 Istvan</button>
+        <button class="person-btn" data-person="Erika" onclick="selectPerson('Erika',this)">👩 Erika</button>
+        <button class="person-btn" data-person="Adam" onclick="selectPerson('Adam',this)">🧒 Ádám</button>
+        <button class="person-btn" data-person="Viktoria" onclick="selectPerson('Viktoria',this)">👧 Viktória</button>
+      </div>
+    </div>
+
+    <div class="card" id="weather-card">
+      <div class="card-title">Időjárás · Budapest</div>
+      <div id="weather-main">
+        <div id="weather-temp">--°C</div>
+        <div id="weather-desc">...</div>
+      </div>
+      <div id="weather-details"></div>
+      <div id="weather-forecast"></div>
+    </div>
+
+    <div class="card" id="timers-card">
+      <div class="card-title">Időzítők</div>
+      <div id="timer-presets">
+        <button class="preset-btn" onclick="addPreset(1)">1p</button>
+        <button class="preset-btn" onclick="addPreset(2)">2p</button>
+        <button class="preset-btn" onclick="addPreset(3)">3p</button>
+        <button class="preset-btn" onclick="addPreset(5)">5p</button>
+        <button class="preset-btn" onclick="addPreset(10)">10p</button>
+      </div>
+      <div id="timer-pending">
+        <span id="timer-pending-text">0 perc</span>
+        <button class="timer-start-btn" onclick="startPendingTimer()">▶ Indít</button>
+        <button class="timer-clear-btn" onclick="clearPending()">×</button>
+      </div>
+      <div id="timers-list"><div class="timer-row" style="background:none;border:none;padding:0;min-height:auto;font-size:13px;color:var(--muted)">Nincs aktív időzítő</div></div>
+    </div>
+
+    <div class="card" id="reminders-card">
+      <div class="card-title">Emlékeztetők</div>
+      <div id="reminders-list"><div style="font-size:13px;color:var(--muted)">Nincs aktív emlékeztető</div></div>
+    </div>
+
+    <div class="card" id="shopping-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div class="card-title" style="margin-bottom:0">Bevásárlólista</div>
+        <div style="display:flex;gap:6px">
+          <button onclick="copyShoppingList()" title="Másolás" style="background:none;border:1px solid var(--border);border-radius:10px;padding:6px 10px;color:var(--muted);cursor:pointer;font-size:14px;min-height:36px">📋</button>
+          <button id="shopping-email-btn" onclick="emailShoppingList()" title="Email küldés" style="background:none;border:1px solid var(--border);border-radius:10px;padding:6px 10px;color:var(--muted);cursor:pointer;font-size:14px;min-height:36px">📧</button>
+        </div>
+      </div>
+      <div id="shopping-input-row">
+        <input id="shopping-input" type="text" placeholder="Hozzáadás...">
+        <button id="shopping-add">+</button>
+      </div>
+      <div id="shopping-list"><div id="shopping-empty">Üres</div></div>
+    </div>
+
+  </div>
+
+  <!-- ======== RIGHT PANEL ======== -->
+  <div id="right-panel">
+
+    <div id="chat-area">
+      <div id="chat-placeholder">
+        Nyomd meg a mikrofon gombot és beszélj<br>
+        vagy írj valamit az alábbi mezőbe<br><br>
+        <span style="font-size:12px;color:var(--muted)">🍳 Béla Home · v3</span>
+      </div>
+    </div>
+
+    <div id="viewer-panel">
+      <div id="viewer-header">
+        <button id="viewer-back-btn" onclick="closeViewer()">← Vissza a csevegéshez</button>
+        <span id="viewer-title"></span>
+      </div>
+      <div id="viewer-iframe-container">
+        <iframe id="viewer-iframe" src="about:blank"
+          allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+          referrerpolicy="no-referrer-when-downgrade"></iframe>
+        <div id="viewer-error">
+          <div style="font-size:36px">🚫</div>
+          <div style="color:var(--text);font-size:16px;font-weight:600">Ez az oldal nem nyílik meg itt</div>
+          <div style="color:var(--muted);font-size:14px;line-height:1.5">Az oldal tiltja a beágyazott megjelenítést</div>
+          <button onclick="openInBrowser()" style="background:var(--accent);border:none;border-radius:10px;padding:10px 22px;color:#fff;cursor:pointer;font-size:15px;margin-top:4px;min-height:44px">🌐 Megnyitás böngészőben</button>
+        </div>
+      </div>
+      <div id="viewer-bottom">
+        <button id="viewer-open-browser-btn" onclick="openInBrowser()">🌐 Megtekintés böngészőben</button>
+      </div>
+    </div>
+
+    <div id="briefing-bar" style="display:none;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;font-size:14px;color:var(--muted);cursor:pointer;min-height:48px" onclick="playBriefing()">
+      🌅 <span id="briefing-preview">Reggeli összefoglaló betöltés...</span>
+    </div>
+
+    <div id="quick-btns">
+      <button class="quick-btn" onclick="sendText('Milyen az időjárás ma?')">🌤 Időjárás</button>
+      <button class="quick-btn" onclick="sendText('Mi a holnapi programom?')">📅 Holnapi nap</button>
+      <button class="quick-btn" onclick="sendText('Adj egy gyors vacsorajavaslatot!')">🍽 Vacsorötlet</button>
+      <button class="quick-btn" onclick="addPreset(5);startPendingTimer()">⏱ 5 perc</button>
+      <button class="quick-btn" onclick="clearHistory()" style="color:var(--red)">🗑 Chat törlése</button>
+      <button class="quick-btn" onclick="sendText('Mi van a hűtőmben amit felhasználhatok?')">🧊 Hűtő tipp</button>
+    </div>
+
+    <div id="input-area">
+      <textarea id="text-input" placeholder="Írj valamit..." rows="1"></textarea>
+      <button id="send-btn" onclick="submitText()" aria-label="Küldés">
+        <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg>
+      </button>
+      <button id="mic-btn" aria-label="Mikrofon">
+        <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V20H9v2h6v-2h-2v-2.07A7 7 0 0 0 19 11h-2z"/></svg>
+      </button>
+    </div>
+
+    <div id="status">Kész</div>
+
+  </div>
+</div>
+
+<button id="settings-btn" aria-label="Beállítások" onclick="openSettings()">⚙️</button>
+
+<div id="settings-overlay" onclick="if(event.target===this) closeSettings()">
+  <div id="settings-panel">
+    <div id="settings-header">
+      <h2>⚙️ Beállítások</h2>
+      <button id="settings-close" onclick="closeSettings()">×</button>
+    </div>
+
+    <div class="settings-field">
+      <label>Hang</label>
+      <select id="voice-select" onchange="saveVoice(this.value)">
+        <option value="onyx">🎙 onyx</option>
+        <option value="alloy">alloy</option>
+        <option value="ash">ash</option>
+        <option value="coral">coral</option>
+        <option value="echo">echo</option>
+        <option value="fable">fable</option>
+        <option value="nova">nova</option>
+        <option value="sage">sage</option>
+        <option value="shimmer">shimmer</option>
+      </select>
+    </div>
+
+    <div class="settings-field">
+      <label>Bevásárlólista email címzett</label>
+      <input id="settings-email" type="email" placeholder="pl. erika@gmail.com">
+      <div class="settings-hint">Ide megy a 📧 bevásárlólista gomb. Alapértelmezett: styu01@gmail.com</div>
+    </div>
+
+    <div class="settings-field">
+      <label>Város (időjáráshoz)</label>
+      <input id="settings-city" type="text" placeholder="Budapest">
+    </div>
+
+    <div class="settings-field">
+      <label>Resend API kulcs</label>
+      <input id="settings-resend-key" type="password" placeholder="Üresen hagyva a jelenlegi marad">
+      <div class="settings-hint">Csak szerveroldalon tárolva, itt sosem jelenik meg vissza.</div>
+    </div>
+
+    <button id="settings-save" onclick="saveSettings()">Mentés</button>
+  </div>
+</div>
+
+<script>
+// ================================================================
+// PERSON SELECTOR
+// ================================================================
+let currentPerson = localStorage.getItem('bela-person') || 'Istvan'
+
+function selectPerson(name, btn) {
+  currentPerson = name
+  localStorage.setItem('bela-person', name)
+  document.querySelectorAll('.person-btn').forEach(b => b.classList.toggle('active', b.dataset.person === name))
+  setStatus(`${name} profil betöltve`)
+}
+
+// init from localStorage
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.person-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.person === currentPerson)
+  })
+})
+
+// ================================================================
+// CLOCK
+// ================================================================
+const DAYS = ['vasárnap','hétfő','kedd','szerda','csütörtök','péntek','szombat']
+const MONTHS = ['jan','feb','már','ápr','máj','jún','júl','aug','szep','okt','nov','dec']
+
+function updateClock() {
+  const n = new Date()
+  document.getElementById('clock-time').textContent =
+    `${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`
+  document.getElementById('clock-date').textContent =
+    `${DAYS[n.getDay()]}, ${MONTHS[n.getMonth()]} ${n.getDate()}.`
+}
+updateClock()
+setInterval(updateClock, 10000)
+
+// ================================================================
+// WEATHER
+// ================================================================
+async function loadWeather() {
+  try {
+    const city = getWeatherCity()
+    const r = await fetch(`/api/weather?city=${encodeURIComponent(city)}&days=3`)
+    const d = await r.json()
+    document.querySelector('#weather-card .card-title').textContent = `Időjárás · ${city}`
+    if (!d.temp) return
+    document.getElementById('weather-temp').textContent = `${d.temp}°C`
+    document.getElementById('weather-desc').textContent = d.desc || ''
+    document.getElementById('weather-details').textContent =
+      `Érz. ${d.feels}°C · Párat. ${d.humidity}% · Min ${d.minTemp}° / Max ${d.maxTemp}°`
+
+    const fc = document.getElementById('weather-forecast')
+    if (d.forecast && d.forecast.length) {
+      fc.innerHTML = d.forecast.map(f => `
+        <div class="forecast-day">
+          <div class="fd-name">${f.day}</div>
+          <div class="fd-temp">${f.max}°/${f.min}°</div>
+          <div class="fd-desc" title="${f.desc}">${f.desc}</div>
+        </div>`).join('')
+    }
+  } catch {}
+}
+loadWeather()
+setInterval(loadWeather, 600000)
+
+// ================================================================
+// TIMERS
+// ================================================================
+let timers = []
+let pendingSeconds = 0
+let alarmBeepInterval = null
+
+function saveTimers() {
+  localStorage.setItem('bela-timers', JSON.stringify(
+    timers.map(t => ({ id: t.id, endMs: t.endMs, label: t.label, done: t.done, acknowledged: !!t.acknowledged }))
+  ))
+}
+
+function restoreTimers() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('bela-timers') || '[]')
+    saved.filter(t => !t.acknowledged).forEach(t => {
+      timers.push({ ...t })
+      if (!t.done) {
+        if (Date.now() < t.endMs) startTimerInterval(t.id)
+        else { const tm = timers.find(x => x.id === t.id); if (tm) { tm.done = true; triggerAlarm(t.id) } }
+      } else {
+        triggerAlarm(t.id)
+      }
+    })
+    renderTimers()
+  } catch {}
+}
+
+function addPreset(minutes) {
+  pendingSeconds += minutes * 60
+  const total = pendingSeconds / 60
+  document.getElementById('timer-pending-text').textContent =
+    Number.isInteger(total) ? `${total} perc` : `${Math.floor(total)}p ${pendingSeconds % 60}mp`
+  document.getElementById('timer-pending').style.display = 'flex'
+}
+
+function clearPending() {
+  pendingSeconds = 0
+  document.getElementById('timer-pending').style.display = 'none'
+}
+
+function startPendingTimer() {
+  if (pendingSeconds <= 0) return
+  const mins = Math.round(pendingSeconds / 60)
+  const label = mins < 60 ? `${mins} perces időzítő` : `${Math.floor(mins/60)}ó ${mins%60 ? (mins%60)+'p' : ''} időzítő`
+  addTimer(pendingSeconds, label)
+  clearPending()
+}
+
+function addTimer(seconds, label) {
+  const id = Date.now()
+  const endMs = Date.now() + seconds * 1000
+  timers.push({ id, endMs, label, done: false, acknowledged: false })
+  saveTimers()
+  renderTimers()
+  startTimerInterval(id)
+}
+
+function startTimerInterval(id) {
+  const iv = setInterval(() => {
+    const t = timers.find(x => x.id === id)
+    if (!t || t.acknowledged) { clearInterval(iv); return }
+    if (Date.now() >= t.endMs && !t.done) {
+      t.done = true; clearInterval(iv)
+      saveTimers(); triggerAlarm(id); renderTimers()
+    } else if (!t.done) {
+      renderTimers()
+    }
+  }, 1000)
+}
+
+function triggerAlarm(id) {
+  const t = timers.find(x => x.id === id)
+  if (!t || t.acknowledged) return
+  speak(`${t.label} lejárt! Kérlek nyugtázd!`)
+  if (!alarmBeepInterval) {
+    playBeep()
+    alarmBeepInterval = setInterval(playBeep, 2500)
+  }
+}
+
+function playBeep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)()
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.connect(gain); gain.connect(ctx.destination)
+    osc.type = 'sine'
+    osc.frequency.setValueAtTime(880, ctx.currentTime)
+    osc.frequency.setValueAtTime(660, ctx.currentTime + 0.12)
+    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.24)
+    gain.gain.setValueAtTime(0.35, ctx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5)
+    osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.5)
+    setTimeout(() => ctx.close(), 800)
+  } catch {}
+}
+
+function acknowledgeTimer(id) {
+  const t = timers.find(x => x.id === id)
+  if (t) t.acknowledged = true
+  timers = timers.filter(x => !x.acknowledged)
+  saveTimers()
+  const hasAlarms = timers.some(x => x.done && !x.acknowledged)
+  if (!hasAlarms && alarmBeepInterval) { clearInterval(alarmBeepInterval); alarmBeepInterval = null }
+  renderTimers()
+}
+
+function removeTimer(id) {
+  timers = timers.filter(x => x.id !== id)
+  saveTimers()
+  const hasAlarms = timers.some(x => x.done && !x.acknowledged)
+  if (!hasAlarms && alarmBeepInterval) { clearInterval(alarmBeepInterval); alarmBeepInterval = null }
+  renderTimers()
+}
+
+function renderTimers() {
+  const el = document.getElementById('timers-list')
+  const visible = timers.filter(t => !t.acknowledged)
+  if (!visible.length) {
+    el.innerHTML = '<div class="timer-row" style="background:none;border:none;padding:0;min-height:auto;font-size:13px;color:var(--muted)">Nincs aktív időzítő</div>'
+    return
+  }
+  el.innerHTML = visible.map(t => {
+    if (t.done) {
+      return `<div class="timer-row alarm">
+        <span class="timer-label">🔔 ${esc(t.label)}</span>
+        <button class="timer-ack-btn" onclick="acknowledgeTimer(${t.id})">✓ Oké, vettem</button>
+      </div>`
+    }
+    const rem = Math.max(0, Math.ceil((t.endMs - Date.now()) / 1000))
+    const m = Math.floor(rem / 60), s = rem % 60
+    const cls = rem < 60 ? 'urgent' : ''
+    return `<div class="timer-row ${cls}">
+      <span class="timer-label">${esc(t.label)}</span>
+      <span class="timer-time">${m}:${String(s).padStart(2,'0')}</span>
+      <button class="timer-del" onclick="removeTimer(${t.id})">×</button>
+    </div>`
+  }).join('')
+}
+
+restoreTimers()
+
+// ================================================================
+// SHOPPING LIST
+// ================================================================
+let shopping = JSON.parse(localStorage.getItem('bela-shopping') || '[]')
+
+function saveShoppingList() {
+  localStorage.setItem('bela-shopping', JSON.stringify(shopping))
+}
+
+function addShoppingItem(name) {
+  if (!name.trim()) return
+  shopping.push({ id: Date.now(), name: name.trim(), done: false })
+  saveShoppingList(); renderShopping()
+}
+
+function toggleShoppingItem(id) {
+  const item = shopping.find(x => x.id === id)
+  if (item) { item.done = !item.done; saveShoppingList(); renderShopping() }
+}
+
+function removeShoppingItem(id) {
+  shopping = shopping.filter(x => x.id !== id)
+  saveShoppingList(); renderShopping()
+}
+
+function copyShoppingList() {
+  if (!shopping.length) return
+  const text = shopping.filter(x=>!x.done).map(x => '• ' + x.name).join('\n')
+  navigator.clipboard.writeText(text).then(() => setStatus('Lista vágólapra másolva ✓')).catch(() => setStatus('Másolás sikertelen'))
+}
+
+async function emailShoppingList() {
+  if (!shopping.length) { setStatus('Lista üres'); return }
+  const items = shopping.filter(x=>!x.done).map(x => x.name)
+  if (!items.length) { setStatus('Nincs bejelöletlen tétel'); return }
+  try {
+    const r = await fetch('/api/shopping-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items, to: getNotifyEmail() })
+    })
+    const d = await r.json()
+    setStatus(d.ok ? 'Email elküldve ✓' : 'Email hiba: ' + (d.error || '?'))
+  } catch { setStatus('Email küldés sikertelen') }
+}
+
+const SHOPPING_EMOJI_MAP = [
+  [/tej/, '🥛'], [/paradicsom/, '🍅'], [/kenyér|zsemle|kifli/, '🍞'], [/tojás/, '🥚'],
+  [/sajt/, '🧀'], [/hús|csirke|marha|sertés|szalonna|kolbász/, '🍗'], [/alma/, '🍎'], [/banán/, '🍌'],
+  [/krumpli|burgonya/, '🥔'], [/hagyma/, '🧅'], [/fokhagyma/, '🧄'], [/paprika/, '🫑'],
+  [/vaj/, '🧈'], [/tészta|spagetti|makaróni/, '🍝'], [/rizs/, '🍚'], [/víz|ásványvíz/, '💧'],
+  [/bor/, '🍷'], [/sör/, '🍺'], [/kávé/, '☕'], [/csoki|csokoládé/, '🍫'], [/citrom/, '🍋'],
+  [/répa|sárgarépa/, '🥕'], [/uborka/, '🥒'], [/gomba/, '🍄'],
+]
+function shoppingEmoji(name) {
+  const n = name.toLowerCase()
+  for (const [re, emoji] of SHOPPING_EMOJI_MAP) if (re.test(n)) return emoji
+  return '🛒'
+}
+
+function renderShopping() {
+  const el = document.getElementById('shopping-list')
+  if (!shopping.length) { el.innerHTML = '<div id="shopping-empty" style="font-size:13px;color:var(--muted)">Üres</div>'; return }
+  el.innerHTML = shopping.map(item => `
+    <div class="shopping-item ${item.done ? 'done' : ''}">
+      <div class="si-check" onclick="toggleShoppingItem(${item.id})">
+        ${item.done ? '<svg viewBox="0 0 24 24" width="12" height="12"><path fill="white" d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>' : ''}
+      </div>
+      <span class="si-icon">${shoppingEmoji(item.name)}</span>
+      <span class="si-text">${esc(item.name)}</span>
+      <button class="si-del" onclick="removeShoppingItem(${item.id})">×</button>
+    </div>`).join('')
+}
+
+renderShopping()
+
+document.getElementById('shopping-add').addEventListener('click', () => {
+  const inp = document.getElementById('shopping-input')
+  addShoppingItem(inp.value); inp.value = ''
+})
+document.getElementById('shopping-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { addShoppingItem(e.target.value); e.target.value = '' }
+})
+
+// ================================================================
+// SETTINGS
+// ================================================================
+function getNotifyEmail() {
+  return localStorage.getItem('bela-notify-email') || 'styu01@gmail.com'
+}
+function getWeatherCity() {
+  return localStorage.getItem('bela-weather-city') || 'Budapest'
+}
+
+async function refreshResendStatus() {
+  const btn = document.getElementById('shopping-email-btn')
+  try {
+    const r = await fetch('/api/settings/resend-status')
+    const d = await r.json()
+    if (d.hasKey) {
+      btn.style.opacity = ''
+      btn.style.pointerEvents = ''
+      btn.title = 'Email küldés'
+    } else {
+      btn.style.opacity = '0.4'
+      btn.style.pointerEvents = 'none'
+      btn.title = 'Resend kulcs nincs beállítva -- nyisd meg a Beállításokat (⚙️)'
+    }
+  } catch {}
+}
+refreshResendStatus()
+
+function openSettings() {
+  document.getElementById('settings-email').value = getNotifyEmail()
+  document.getElementById('settings-city').value = getWeatherCity()
+  document.getElementById('settings-resend-key').value = ''
+  document.getElementById('settings-overlay').classList.add('open')
+}
+
+function closeSettings() {
+  document.getElementById('settings-overlay').classList.remove('open')
+}
+
+async function saveSettings() {
+  const email = document.getElementById('settings-email').value.trim() || 'styu01@gmail.com'
+  const city = document.getElementById('settings-city').value.trim() || 'Budapest'
+  const resendKey = document.getElementById('settings-resend-key').value.trim()
+
+  localStorage.setItem('bela-notify-email', email)
+  localStorage.setItem('bela-weather-city', city)
+
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resendKey: resendKey || undefined, emailTo: email, city })
+    })
+    const d = await r.json()
+    setStatus(d.ok ? 'Beállítások mentve ✓' : 'Mentési hiba')
+  } catch {
+    setStatus('Mentési hiba (nincs kapcsolat a szerverrel)')
+  }
+
+  document.getElementById('settings-resend-key').value = ''
+  loadWeather()
+  refreshResendStatus()
+  closeSettings()
+}
+
+// ================================================================
+// TTS
+// ================================================================
+let ttsAudio = null
+
+function getVoice() {
+  return localStorage.getItem('bela-voice') || 'onyx'
+}
+function saveVoice(v) {
+  localStorage.setItem('bela-voice', v)
+  document.getElementById('voice-select').value = v
+}
+
+// init voice selector from localStorage
+document.addEventListener('DOMContentLoaded', () => {
+  const saved = getVoice()
+  const sel = document.getElementById('voice-select')
+  if (sel) sel.value = saved
+})
+
+async function speak(text) {
+  if (!text) return
+  if (ttsAudio) { ttsAudio.pause(); ttsAudio = null }
+  try {
+    const r = await fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice: getVoice() })
+    })
+    if (!r.ok) throw new Error()
+    const blob = await r.blob()
+    const url = URL.createObjectURL(blob)
+    ttsAudio = new Audio(url)
+    ttsAudio.play()
+    ttsAudio.onended = () => { URL.revokeObjectURL(url); ttsAudio = null }
+  } catch {
+    const u = new SpeechSynthesisUtterance(text)
+    u.lang = 'hu-HU'; speechSynthesis.cancel(); speechSynthesis.speak(u)
+  }
+}
+
+// ================================================================
+// HTML ESCAPING
+// ================================================================
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+}
+
+// ================================================================
+// MARKDOWN (minimal)
+// ================================================================
+function renderMarkdown(text) {
+  return text
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g,'<em>$1</em>')
+    .replace(/`(.+?)`/g,'<code>$1</code>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" class="viewer-link" data-title="$1" style="color:var(--accent-dark);cursor:pointer">$1</a>')
+    .replace(/(^|\s)(https?:\/\/(?:www\.youtube\.com\/watch\?v=|youtu\.be\/)[^\s<]+)/g,'$1<a href="$2" class="viewer-link" data-title="YouTube" style="color:var(--red);cursor:pointer">▶ YouTube</a>')
+    .replace(/(^|\s)(https?:\/\/(?!(?:www\.youtube\.com|youtu\.be))[^\s<]+)/g,'$1<a href="$2" class="viewer-link" data-title="$2" style="color:var(--accent-dark);cursor:pointer">$2</a>')
+    .replace(/^### (.+)$/gm,'<h3>$1</h3>')
+    .replace(/^## (.+)$/gm,'<h2>$1</h2>')
+    .replace(/^# (.+)$/gm,'<h1>$1</h1>')
+    .replace(/^\- (.+)$/gm,'<li class="u">$1</li>')
+    .replace(/^(\d+)\. (.+)$/gm,'<li class="o">$2</li>')
+    .replace(/\n/g,'<br>')
+    .replace(/(<li class="u">.*?<\/li>)(<br>(<li class="u">.*?<\/li>))*/gs, m => `<ul>${m.replace(/<br>/g,'').replace(/ class="u"/g,'')}</ul>`)
+    .replace(/(<li class="o">.*?<\/li>)(<br>(<li class="o">.*?<\/li>))*/gs, m => `<ol>${m.replace(/<br>/g,'').replace(/ class="o"/g,'')}</ol>`)
+}
+
+// ================================================================
+// IN-APP VIEWER
+// ================================================================
+let viewerCurrentUrl = ''
+let viewerLoadTimeout = null
+
+function toYouTubeEmbed(url) {
+  const m = url.match(/(?:youtube\.com\/watch\?(?:[^#]*&)?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/)
+  return m ? `https://www.youtube.com/embed/${m[1]}?rel=0` : null
+}
+
+function isYouTubeSearch(url) {
+  return /youtube\.com\/results/.test(url)
+}
+
+function openViewer(url, title) {
+  if (isYouTubeSearch(url)) { openInBrowserUrl(url); return }
+  viewerCurrentUrl = url
+  const embed = toYouTubeEmbed(url)
+  const src = embed || url
+
+  const iframe = document.getElementById('viewer-iframe')
+  const errDiv = document.getElementById('viewer-error')
+
+  document.getElementById('viewer-title').textContent = title || url
+  errDiv.classList.remove('visible')
+  iframe.src = 'about:blank'
+  clearTimeout(viewerLoadTimeout)
+
+  iframe.onload = () => {
+    clearTimeout(viewerLoadTimeout)
+    try {
+      const loc = iframe.contentDocument.location.href
+      if (loc === 'about:blank' && iframe.getAttribute('data-loading-src') !== 'about:blank') {
+        errDiv.classList.add('visible')
+      }
+    } catch {
+      // Cross-origin SecurityError: page loaded OK
+    }
+  }
+
+  viewerLoadTimeout = setTimeout(() => {
+    if (!errDiv.classList.contains('visible')) {
+      document.getElementById('viewer-title').textContent = (title || url) + ' — lassú betöltés'
+    }
+  }, 12000)
+
+  iframe.setAttribute('data-loading-src', src)
+  iframe.src = src
+  document.getElementById('right-panel').classList.add('viewer-active')
+}
+
+function closeViewer() {
+  clearTimeout(viewerLoadTimeout)
+  document.getElementById('viewer-iframe').src = 'about:blank'
+  document.getElementById('viewer-error').classList.remove('visible')
+  document.getElementById('right-panel').classList.remove('viewer-active')
+  viewerCurrentUrl = ''
+}
+
+function openInBrowserUrl(url) {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+function openInBrowser() {
+  if (!viewerCurrentUrl) return
+  openInBrowserUrl(viewerCurrentUrl)
+}
+
+// ================================================================
+// CHAT HISTORY & RENDERING
+// ================================================================
+let history = []
+const HISTORY_KEY = 'bela-chat-history'
+const chatArea = document.getElementById('chat-area')
+
+chatArea.addEventListener('click', e => {
+  const a = e.target.closest('a.viewer-link')
+  if (!a) return
+  e.preventDefault()
+  openViewer(a.getAttribute('href'), a.dataset.title || a.textContent.trim())
+})
+
+function saveHistory() {
+  try {
+    const toSave = history.slice(-50).map(m => ({ role: m.role, content: m.content, ts: m.ts || Date.now() }))
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(toSave))
+  } catch {}
+}
+
+function restoreHistory() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]')
+    if (!saved.length) return
+    saved.forEach(m => {
+      history.push(m)
+      appendMsg(m.role === 'user' ? 'user' : 'bela', m.content, true)
+    })
+  } catch {}
+}
+
+function clearHistory() {
+  history = []
+  localStorage.removeItem(HISTORY_KEY)
+  chatArea.innerHTML = '<div id="chat-placeholder" style="color:var(--muted);font-size:15px;margin:auto;text-align:center;line-height:1.8">Nyomd meg a mikrofon gombot és beszélj<br>vagy írj valamit az alábbi mezőbe<br><br><span style="font-size:12px;color:var(--muted)">🍳 Béla Home · v3</span></div>'
+}
+
+function clearPlaceholder() {
+  const ph = document.getElementById('chat-placeholder')
+  if (ph) ph.remove()
+}
+
+function appendMsg(type, content, historyRestore = false) {
+  clearPlaceholder()
+  const wrapper = document.createElement('div')
+  wrapper.className = `msg msg-${type}`
+
+  if (type === 'user') {
+    const b = document.createElement('div')
+    b.className = 'bubble-user'
+    b.textContent = content
+    wrapper.appendChild(b)
+  } else if (type === 'bela') {
+    let short = '', long = '', extra = null
+    try {
+      const parsed = JSON.parse(content)
+      short = parsed.short || ''
+      long = parsed.long || short
+      extra = parsed.extra || null
+    } catch {
+      short = content; long = content
+    }
+
+    const avatar = document.createElement('div')
+    avatar.className = 'bela-avatar'
+    avatar.textContent = '👨‍🍳'
+    wrapper.appendChild(avatar)
+
+    const contentCol = document.createElement('div')
+    contentCol.className = 'bela-content'
+
+    if (short) {
+      const bs = document.createElement('div')
+      bs.className = 'bubble-short'
+      bs.textContent = '🔊 ' + short
+      contentCol.appendChild(bs)
+    }
+
+    if (long) {
+      const bl = document.createElement('div')
+      bl.className = 'bubble-long'
+      bl.innerHTML = renderMarkdown(long)
+      contentCol.appendChild(bl)
+    }
+
+    if (extra) {
+      if (extra.type === 'recipe') {
+        const card = document.createElement('div')
+        card.className = 'recipe-card'
+        const links = [
+          extra.sourceUrl ? `<a href="${esc(extra.sourceUrl)}" class="viewer-link" data-title="Recept oldal" style="color:var(--accent-dark);font-size:13px;cursor:pointer">📄 Recept oldal</a>` : '',
+          extra.youtubeUrl ? `<a href="${esc(extra.youtubeUrl)}" class="viewer-link" data-title="YouTube" style="color:var(--red);font-size:13px;cursor:pointer">▶ YouTube</a>` : '',
+        ].filter(Boolean).join('  ')
+        card.innerHTML = `<div class="recipe-img-placeholder">🍽️</div>
+          <h3>📖 ${esc(extra.name)}</h3>
+          ${links ? `<div style="margin-bottom:10px;display:flex;gap:14px">${links}</div>` : ''}
+          <h4>Hozzávalók</h4>
+          <ul>${(extra.ingredients||[]).map(i=>`<li>${esc(i)}</li>`).join('')}</ul>
+          <h4>Elkészítés</h4>
+          <ol>${(extra.steps||[]).map(s=>`<li>${esc(s)}</li>`).join('')}</ol>`
+        contentCol.appendChild(card)
+      } else if (!historyRestore) {
+        if (extra.type === 'timer') {
+          addTimer(extra.seconds || 60, extra.label || 'Időzítő')
+        } else if (extra.type === 'shopping' && extra.action === 'add') {
+          addShoppingItem(extra.item)
+        } else if (extra.type === 'reminder') {
+          addReminder(extra.text, extra.dueMs || null)
+        } else if (extra.type === 'calendar_add') {
+          addCalendarRequest(extra)
+        }
+      }
+    }
+
+    wrapper.appendChild(contentCol)
+
+    if (!historyRestore) speak(short || long)
+  }
+
+  chatArea.appendChild(wrapper)
+  chatArea.scrollTop = chatArea.scrollHeight
+}
+
+// ================================================================
+// SEND (text or voice)
+// ================================================================
+let isProcessing = false
+
+async function sendText(msg) {
+  if (!msg || isProcessing) return
+  isProcessing = true
+  setStatus('Feldolgozás...')
+  setSendDisabled(true)
+
+  appendMsg('user', msg)
+  history.push({ role: 'user', content: msg, ts: Date.now() })
+  saveHistory()
+
+  try {
+    const ctrl = new AbortController()
+    const timeout = setTimeout(() => ctrl.abort(), 20000)
+    const r = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, history: history.slice(-8), person: currentPerson }),
+      signal: ctrl.signal
+    })
+    clearTimeout(timeout)
+    const d = await r.json()
+    const reply = d.text || '{}'
+    history.push({ role: 'assistant', content: reply, ts: Date.now() })
+    saveHistory()
+    appendMsg('bela', reply)
+    setStatus('Kész')
+  } catch (err) {
+    const belaErr = err.name === 'AbortError'
+      ? '{"short":"Elakadtam egy pillanatra. Az agyam 0.01%-a sztrájkol. Próbáld újra.","long":"Elakadtam egy pillanatra. Az agyam 0.01%-a sztrájkol. Próbáld újra."}'
+      : navigator.onLine === false
+      ? '{"short":"Nincs internet. Timer, emlékeztető, bevásárlólista működik.","long":"Nincs internet kapcsolat. Az offline funkciók (timer, emlékeztető, bevásárlólista) rendben vannak."}'
+      : '{"short":"Valami elromlott. Ne ess pánikba — próbáld újra.","long":"Valami elromlott. Ne ess pánikba — próbáld újra."}'
+    appendMsg('bela', belaErr)
+    setStatus('Hiba')
+  } finally {
+    isProcessing = false; setSendDisabled(false)
+  }
+}
+
+function submitText() {
+  const inp = document.getElementById('text-input')
+  const val = inp.value.trim()
+  if (!val) return
+  inp.value = ''; inp.style.height = 'auto'
+  sendText(val)
+}
+
+// Auto-resize textarea
+document.getElementById('text-input').addEventListener('input', function() {
+  this.style.height = 'auto'
+  this.style.height = Math.min(this.scrollHeight, 120) + 'px'
+})
+document.getElementById('text-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitText() }
+})
+
+// ================================================================
+// MIC / VOICE
+// ================================================================
+const micBtn = document.getElementById('mic-btn')
+let recorder = null, chunks = [], recording = false
+
+micBtn.addEventListener('click', async () => {
+  if (recording) { recorder?.stop(); return }
+  if (isProcessing) return
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    chunks = []
+    const mimeType = ['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/mp4']
+      .find(m => MediaRecorder.isTypeSupported(m)) || ''
+
+    recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {})
+    recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data) }
+
+    recorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop())
+      recording = false; micBtn.classList.remove('recording')
+      micBtn.classList.add('loading')
+      setStatus('Hangfelismerés...')
+      isProcessing = true; setSendDisabled(true)
+
+      const blob = new Blob(chunks, { type: mimeType || 'audio/webm' })
+      const base64 = await blobToBase64(blob)
+
+      try {
+        const sttR = await fetch('/api/stt', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ audio: base64, mimeType: mimeType || 'audio/webm' })
+        })
+        const sttD = await sttR.json()
+        if (!sttD.text) throw new Error('Nem értettem')
+
+        const userMsg = sttD.text
+        appendMsg('user', userMsg)
+        history.push({ role: 'user', content: userMsg, ts: Date.now() })
+        saveHistory()
+
+        setStatus('Béla gondolkodik...')
+        const chatCtrl = new AbortController()
+        const chatTimeout = setTimeout(() => chatCtrl.abort(), 20000)
+        const chatR = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: userMsg, history: history.slice(-8), person: currentPerson }),
+          signal: chatCtrl.signal
+        })
+        clearTimeout(chatTimeout)
+        const chatD = await chatR.json()
+        const reply = chatD.text || '{}'
+        history.push({ role: 'assistant', content: reply, ts: Date.now() })
+        saveHistory()
+        appendMsg('bela', reply)
+        setStatus('Kész')
+      } catch (err) {
+        const belaErr = err.name === 'AbortError'
+          ? '{"short":"Elakadtam. Az agyam sztrájkol. Próbáld újra.","long":"Timeout — próbáld újra."}'
+          : '{"short":"Nem értettem, próbáld újra.","long":"Nem értettem, próbáld újra."}'
+        setStatus('Hiba'); appendMsg('bela', belaErr)
+      } finally {
+        micBtn.classList.remove('loading'); isProcessing = false; setSendDisabled(false)
+      }
+    }
+
+    recorder.start(); recording = true
+    micBtn.classList.add('recording')
+    setStatus('Hallgatlak... (nyomd meg újra a leállításhoz)')
+  } catch {
+    setStatus('Mikrofon hozzáférés megtagadva')
+  }
+})
+
+function blobToBase64(blob) {
+  return new Promise((res, rej) => {
+    const r = new FileReader()
+    r.onload = () => res(r.result.split(',')[1])
+    r.onerror = rej; r.readAsDataURL(blob)
+  })
+}
+
+// ================================================================
+// HELPERS
+// ================================================================
+function setStatus(txt) { document.getElementById('status').textContent = txt }
+function setSendDisabled(v) {
+  document.getElementById('send-btn').disabled = v
+  micBtn.classList.toggle('loading', v && !recording)
+}
+
+// ================================================================
+// CALENDAR REQUESTS
+// ================================================================
+async function addCalendarRequest(data) {
+  try {
+    await fetch('/api/calendar-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    })
+    // visual feedback in chat
+    const note = document.createElement('div')
+    note.style.cssText = 'font-size:13px;color:var(--muted);text-align:center;padding:6px'
+    note.textContent = `📅 Naptárba felvéve: ${data.summary} (${data.date} ${data.time || ''}) -- BÉLA feldolgozza`
+    document.getElementById('chat-area').appendChild(note)
+
+    const chipWrap = document.createElement('div')
+    chipWrap.style.cssText = 'text-align:center'
+    const chip = document.createElement('div')
+    chip.className = 'calendar-confirm-chip'
+    chip.textContent = `Felvettem: ${data.summary} - ${data.date} ${data.time || ''}-ra`
+    chipWrap.appendChild(chip)
+    document.getElementById('chat-area').appendChild(chipWrap)
+    document.getElementById('chat-area').scrollTop = document.getElementById('chat-area').scrollHeight
+  } catch {}
+}
+
+// ================================================================
+// REMINDERS
+// ================================================================
+let reminders = []
+
+async function loadReminders() {
+  try {
+    const r = await fetch('/api/reminders')
+    reminders = await r.json()
+    renderReminders()
+    // announce due reminders
+    reminders.filter(r => r.due && !r._announced).forEach(r => {
+      r._announced = true
+      speak(`Emlékeztető: ${r.text}`)
+    })
+  } catch {}
+}
+
+async function addReminder(text, dueMs) {
+  try {
+    await fetch('/api/reminders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, dueMs })
+    })
+    loadReminders()
+  } catch {}
+}
+
+async function doneReminder(id) {
+  await fetch(`/api/reminders/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ done: true })
+  })
+  loadReminders()
+}
+
+function renderReminders() {
+  const el = document.getElementById('reminders-list')
+  const active = reminders.filter(r => !r.done)
+  if (!active.length) {
+    el.innerHTML = '<div style="font-size:13px;color:var(--muted)">Nincs aktív emlékeztető</div>'
+    return
+  }
+  el.innerHTML = active.map(r => `
+    <div class="timer-row ${r.due ? 'urgent' : ''}" style="margin-bottom:4px">
+      <span class="timer-label" style="font-size:14px">${esc(r.text)}</span>
+      ${r.due ? '<span style="font-size:12px;color:var(--orange)">● Most</span>' : ''}
+      <button class="timer-del" onclick="doneReminder(${r.id})" title="Kész">✓</button>
+    </div>`).join('')
+}
+
+loadReminders()
+setInterval(loadReminders, 60000)
+
+// ================================================================
+// BRIEFING
+// ================================================================
+let briefingText = null
+
+async function loadBriefing() {
+  try {
+    const r = await fetch('/api/briefing')
+    const d = await r.json()
+    if (!d.text || !d.generatedAt) return
+    // only show if generated today
+    const age = Date.now() - d.generatedAt
+    if (age > 18 * 3600 * 1000) return // older than 18h, skip
+    briefingText = d.text
+    document.getElementById('briefing-bar').style.display = 'block'
+    const preview = d.text.replace(/\n/g,' ').slice(0, 80)
+    document.getElementById('briefing-preview').textContent = preview + (d.text.length > 80 ? '...' : '')
+  } catch {}
+}
+
+function playBriefing() {
+  if (briefingText) speak(briefingText)
+}
+
+loadBriefing()
+
+// ================================================================
+// WAKE WORD: "Szia Béla"
+// ================================================================
+let wakeRecognition = null
+let wakeActive = false
+const WAKE_PHRASES = ['szia béla', 'szia bela', 'szia béla!', 'hello béla', 'hey béla']
+
+function startWakeWord() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+  if (!SR) return // nem támogatott böngésző
+
+  wakeRecognition = new SR()
+  wakeRecognition.lang = 'hu-HU'
+  wakeRecognition.continuous = true
+  wakeRecognition.interimResults = true
+  wakeRecognition.maxAlternatives = 3
+
+  wakeRecognition.onresult = (e) => {
+    if (recording || isProcessing) return
+    const transcript = Array.from(e.results)
+      .map(r => Array.from(r).map(a => a.transcript).join(' '))
+      .join(' ')
+      .toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '') // strip accents for matching
+
+    const matched = WAKE_PHRASES.some(p =>
+      transcript.normalize('NFD').replace(/[̀-ͯ]/g, '').includes(
+        p.normalize('NFD').replace(/[̀-ͯ]/g, '')
+      )
+    )
+
+    if (matched && !wakeActive) {
+      wakeActive = true
+      wakeRecognition.stop()
+      // greet and start recording
+      const greetText = 'Szia! Miben segíthetek?'
+      speak(greetText)
+      setStatus('Figyelem...')
+      setTimeout(() => {
+        wakeActive = false
+        micBtn.click() // start recording
+        setTimeout(() => startWakeWord(), 500) // restart wake detection after recording
+      }, 1800)
+    }
+  }
+
+  wakeRecognition.onerror = (e) => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') return
+    setTimeout(startWakeWord, 3000)
+  }
+
+  wakeRecognition.onend = () => {
+    if (!wakeActive && !recording) setTimeout(startWakeWord, 1000)
+  }
+
+  try { wakeRecognition.start() } catch {}
+}
+
+// Start wake word after first user interaction (browser policy)
+document.addEventListener('click', () => {
+  if (!wakeRecognition) startWakeWord()
+}, { once: true })
+
+// Wake word indicator
+const wakeIndicator = document.createElement('div')
+wakeIndicator.style.cssText = 'position:fixed;bottom:8px;left:8px;font-size:11px;color:var(--muted);pointer-events:none;opacity:0.6'
+wakeIndicator.textContent = '● Mondj "Szia Béla!" a kézmentes aktiváláshoz'
+document.body.appendChild(wakeIndicator)
+
+// ================================================================
+// BACKGROUND MUSIC: AC/DC Back in Black (YouTube IFrame API)
+// ================================================================
+const BG_VIDEO_ID = 'rrim6_9VSeM'
+let ytPlayer = null
+let ytReady = false
+
+// Load YouTube IFrame API
+const ytScript = document.createElement('script')
+ytScript.src = 'https://www.youtube.com/iframe_api'
+document.head.appendChild(ytScript)
+
+window.onYouTubeIframeAPIReady = function() {
+  const container = document.createElement('div')
+  container.id = 'yt-container'
+  container.style.cssText = 'position:fixed;bottom:-1px;right:-1px;width:1px;height:1px;overflow:hidden;pointer-events:none'
+  document.body.appendChild(container)
+
+  ytPlayer = new YT.Player('yt-container', {
+    videoId: BG_VIDEO_ID,
+    playerVars: { autoplay: 0, controls: 0, mute: 0 },
+    events: {
+      onReady: () => { ytReady = true; ytPlayer.setVolume(15) },
+    }
+  })
+}
+
+function startBgMusic() {
+  if (!ytReady || !ytPlayer) return
+  ytPlayer.setVolume(15)
+  ytPlayer.seekTo(0)
+  ytPlayer.playVideo()
+}
+
+function stopBgMusic(fadeMs = 3000) {
+  if (!ytReady || !ytPlayer) return
+  // fade out
+  let vol = 15
+  const step = setInterval(() => {
+    vol -= 1
+    if (vol <= 0) { ytPlayer.stopVideo(); clearInterval(step) }
+    else ytPlayer.setVolume(vol)
+  }, fadeMs / 15)
+}
+
+async function playBriefingWithMusic() {
+  if (!briefingText) return
+  // fetch random greeting
+  let greeting = 'Jó reggelt a Kiss családnak!'
+  try {
+    const gr = await fetch('/api/greeting')
+    const gd = await gr.json()
+    greeting = gd.greeting || greeting
+  } catch {}
+
+  const fullText = greeting + ' ' + briefingText
+  startBgMusic()
+  speak(fullText)
+  const words = fullText.split(' ').length
+  const estMs = (words / 2.5) * 1000 + 1000
+  setTimeout(() => stopBgMusic(3000), estMs)
+}
+
+window.playBriefing = playBriefingWithMusic
+
+// Restore chat history from previous sessions
+restoreHistory()
+
+// iOS prevent sleep
+setInterval(() => {
+  const a = new (window.AudioContext || window.webkitAudioContext)()
+  a.resume().then(() => setTimeout(() => a.close(), 500)).catch(() => {})
+}, 25000)
+</script>
+</body>
+</html>

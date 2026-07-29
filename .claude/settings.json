@@ -1,4 +1,5 @@
 {
+  "model": "claude-sonnet-5",
   "enabledPlugins": {
     "slack-channel@marveen-marketplace": false,
     "telegram@claude-plugins-official": true
@@ -22,7 +23,29 @@
       { "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/telegram-reply-guard.py\"", "timeout": 10 } ] }
     ],
     "SessionStart": [
-      { "matcher": "startup|resume|clear", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/ledger-replay.py\"", "timeout": 15 } ] }
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/ledger-replay.py\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/rate-limit-notify.py\"",
+            "timeout": 15,
+            "async": true
+          }
+        ]
+      }
     ]
-  }
+  },
+  "effort": "high"
 }
