@@ -59,17 +59,28 @@ export function resolveFromPath(name: string): string {
   return resolved
 }
 
-// Lazy, memoised binary resolver. Unlike a module-level `resolveFromPath(...)`
-// const -- which throws at IMPORT time and takes the whole dashboard (and the
-// scheduler that lives in it) down if the binary is transiently unresolvable --
-// this defers resolution to first use. A boot that happens during a PATH gap
-// therefore succeeds; only the first actual use of the binary can throw, and
-// that call site can handle it. The resolved path is cached after the first
-// successful lookup.
+// Lazy, memoised, self-healing binary resolver. Unlike a module-level
+// `resolveFromPath(...)` const -- which throws at IMPORT time and takes the whole
+// dashboard (and the scheduler that lives in it) down if the binary is
+// transiently unresolvable -- this defers resolution to first use. A boot that
+// happens during a PATH gap therefore succeeds; only the first actual use of the
+// binary can throw, and that call site can handle it.
+//
+// The resolved path is cached, but RE-VALIDATED with existsSync on every call: a
+// cached absolute path can go stale when the binary is moved or its symlink is
+// repointed/broken out from under a long-lived process (claude-code auto-update,
+// nvm version switch, ~/.local/bin/claude swap). existsSync follows symlinks, so
+// a dangling link or a link to a now-missing target fails the check and we
+// re-resolve -- no process restart needed. This kills the silent agent-spawn
+// failure class where the dashboard kept embedding a stale claude path into tmux
+// launch commands until someone restarted it (root-caused 2026-08-05). Still
+// lazy: the FIRST resolve is deferred to first use, so boot-time PATH-gap
+// resilience is preserved.
 export function makeLazyBinResolver(name: string): () => string {
   let cached: string | null = null
   return () => {
-    if (cached === null) cached = resolveFromPath(name)
+    if (cached !== null && existsSync(cached)) return cached
+    cached = resolveFromPath(name)
     return cached
   }
 }

@@ -1292,9 +1292,21 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // member. Killing the suggestion at the source removes the ghost the recovery
     // misreads. Env var verified present in claude.exe (CLAUDE_CODE_ENABLE_*).
     const promptSuggestionEnv = 'export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false && '
+    // Disable Claude Code's in-place auto-updater for every sub-agent (root-caused
+    // 2026-08-05). A running sub-agent whose updater fires does an in-place
+    // `npm i -g @anthropic-ai/claude-code` into the SHARED global nvm prefix; when
+    // it half-completes (native binary optional-dep not fetched) it leaves a
+    // 500-byte "native binary not installed" stub, drops the bin/claude symlink,
+    // and orphans a staging dir -- corrupting the ONE claude install the whole
+    // fleet resolves through. That is the true source of the recurring "claude not
+    // found on PATH" / silent agent-spawn deaths, not just a bela-start race. The
+    // fleet pins claude-code deliberately (see bela-start.sh CLAUDE_PIN); the
+    // updater must never move it out from under a live install. Mirrors
+    // channels.sh's own `export DISABLE_AUTOUPDATER=1`.
+    const autoUpdaterEnv = 'export DISABLE_AUTOUPDATER=1 && '
     // Single-quote `${model}` so values like `claude-opus-4-8[1m]` (1M-context
     // suffix) are not glob-expanded by the shell that tmux spawns the command in.
-    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${ollamaEnv}${deepseekEnv}${openrouterEnv}cd "${dir}" && ${claudeBin()} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
+    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${autoUpdaterEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${ollamaEnv}${deepseekEnv}${openrouterEnv}cd "${dir}" && ${claudeBin()} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
     runTmux(null, ['new-session', '-d', '-s', session, cmd], { timeout: 10000 })
 
     logger.info({ name, session, channelDir: agentChannelDir }, 'Agent tmux session started')
