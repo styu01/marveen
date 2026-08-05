@@ -35,10 +35,10 @@ log "2. Claude Code ellenőrzés..."
 LOCAL_CLAUDE="$HOME/.local/bin/claude"
 # Pinned claude-code version: keep the fleet on ONE known-good version so a
 # self-heal reinstall never silently up/downgrades. Fleet standard (2026-08-05,
-# István-approved): Node 22 + claude-code 2.1.220. Bump here to move the fleet.
+# István-approved): Node 22 + claude-code 2.1.222. Bump here to move the fleet.
 # NOTE: this is the AVX-capable-host pin; fix-avx.sh/install-linux.sh keep a
 # SEPARATE, older CLAUDE_PIN for AVX-less hosts that cannot run the newer build.
-CLAUDE_PIN="2.1.220"
+CLAUDE_PIN="2.1.222"
 
 # Find a claude binary that ACTUALLY resolves, preferring the Node 22 nvm tree
 # (fleet standard) but never hard-binding to one nvm version: a missing bin
