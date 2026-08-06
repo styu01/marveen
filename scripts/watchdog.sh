@@ -181,7 +181,27 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
     continue
   fi
 
-  CMD="export PATH=\"/opt/homebrew/bin:\$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && export ${STATE_ENV_VAR}=\"$CHAN_DIR\" && cd \"$AGENT_DIR\" && ${CLAUDE_BIN} --dangerously-skip-permissions --model '$MODEL' --channels plugin:${AGENT_PROVIDER}@claude-plugins-official"
+  # 2026-08-06 (Istvan-approved narrow hotfix): mirror the safety env-vars the
+  # dashboard's startAgentProcess (src/web/agent-process.ts) sets, so a
+  # watchdog-spawned FALLBACK agent is not divergent. Without these a watchdog
+  # respawn ran with the claude auto-updater ENABLED -- re-corrupting the shared
+  # global claude install (root-caused 2026-08-05) -- missed the phantom-injection
+  # prompt-suggestion fix, and skipped the channel-MCP registration hardening.
+  # The two conditional envs (isolated config dir, fleet OAuth token) are keyed on
+  # the SAME on-disk artifacts the dashboard uses, so this REFLECTS the provisioned
+  # state, never re-derives it: no isolated dir + no token => neither is set,
+  # exactly like the dashboard. (The larger structural fix -- have the watchdog
+  # call the canonical POST /api/agents/<id>/restart path instead of an inline
+  # spawn -- is tracked separately, not done here.)
+  SAFETY_ENV="export DISABLE_AUTOUPDATER=1 && export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false && export MCP_SERVER_CONNECTION_BATCH_SIZE=10 && export MCP_CONNECTION_NONBLOCKING=1 && export MCP_TIMEOUT=60000 && "
+  AGENT_CONFIG_DIR="${AGENT_DIR}.claude-config"
+  if [ -d "$AGENT_CONFIG_DIR" ]; then
+    SAFETY_ENV="${SAFETY_ENV}export CLAUDE_CONFIG_DIR=\"$AGENT_CONFIG_DIR\" && "
+  elif [ -s "$INSTALL_DIR/store/.claude-oauth-token" ]; then
+    SAFETY_ENV="${SAFETY_ENV}export CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat '$INSTALL_DIR/store/.claude-oauth-token')\" && "
+  fi
+
+  CMD="export PATH=\"/opt/homebrew/bin:\$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && ${SAFETY_ENV}export ${STATE_ENV_VAR}=\"$CHAN_DIR\" && cd \"$AGENT_DIR\" && ${CLAUDE_BIN} --dangerously-skip-permissions --model '$MODEL' --channels plugin:${AGENT_PROVIDER}@claude-plugins-official"
 
   tmux new-session -d -s "$SESSION_NAME" "$CMD" 2>/dev/null
   sleep 2
