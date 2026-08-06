@@ -1459,7 +1459,25 @@ export function getAgentProcessInfo(name: string): { running: boolean; session?:
   }
 }
 
+// Cross-process respawn-coordination stamp (2026-08-06 audit). Both the dashboard
+// (restartAgentProcess) and the external watchdog.sh can restart a sub-agent.
+// Without a shared signal, watchdog can `tmux new-session` the same session during
+// the dashboard's stop->start window -- a duplicate-session race. Mirrors the
+// channel-respawn stamp (store/.channel-last-respawn). Best-effort: coordination is
+// an optimisation, so a failed stamp write never fails the restart itself.
+function stampAgentRespawn(name: string): void {
+  try {
+    writeFileSync(join(STORE_DIR, `.agent-${name}-last-respawn`), String(Math.floor(Date.now() / 1000)))
+  } catch {
+    /* ignore -- see comment above */
+  }
+}
+
 export async function restartAgentProcess(name: string, opts: { fresh?: boolean } = {}): Promise<{ ok: boolean; pid?: number; error?: string }> {
+  // Stamp BEFORE stopping so a concurrent watchdog.sh sees a fresh timestamp for
+  // the whole stop->start window and defers instead of racing us to spawn the
+  // same session (watchdog.sh checks store/.agent-<name>-last-respawn).
+  stampAgentRespawn(name)
   if (isAgentRunning(name)) {
     const stopResult = await stopAgentProcess(name)
     if (!stopResult.ok) return { ok: false, error: stopResult.error || 'Failed to stop running agent before restart' }
