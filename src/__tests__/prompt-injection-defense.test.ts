@@ -10,7 +10,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { isEgressBlocked, loadRuntimeAllowlist } from '../../scripts/hooks/egress-gate.mjs'
+import { isEgressBlocked, loadRuntimeAllowlist, isQuarantineFetchAllowed, shouldBlockWebFetch } from '../../scripts/hooks/egress-gate.mjs'
 import {
   injectEgressGate,
   ensureEgressGate,
@@ -69,6 +69,83 @@ describe('quarantine-reader sub-agent definition', () => {
 // ---------------------------------------------------------------------------
 // 2. Egress gate hook
 // ---------------------------------------------------------------------------
+describe('isQuarantineFetchAllowed (quarantine-reader Tier-2 SSRF guard)', () => {
+  it('allows any https URL to a real domain name', () => {
+    expect(isQuarantineFetchAllowed('https://example.com/article')).toBe(true)
+    expect(isQuarantineFetchAllowed('https://blog.example.com/post')).toBe(true)
+    expect(isQuarantineFetchAllowed('https://status.anthropic.com/')).toBe(true)
+    expect(isQuarantineFetchAllowed('https://news.ycombinator.com/')).toBe(true)
+  })
+
+  it('requires https -- blocks http and other schemes', () => {
+    expect(isQuarantineFetchAllowed('http://example.com/')).toBe(false)
+    expect(isQuarantineFetchAllowed('ftp://example.com/')).toBe(false)
+    expect(isQuarantineFetchAllowed('file:///etc/passwd')).toBe(false)
+    expect(isQuarantineFetchAllowed('gopher://example.com/')).toBe(false)
+  })
+
+  it('blocks localhost (and *.localhost)', () => {
+    expect(isQuarantineFetchAllowed('https://localhost/')).toBe(false)
+    expect(isQuarantineFetchAllowed('https://localhost:3420/api/messages')).toBe(false)
+    expect(isQuarantineFetchAllowed('https://foo.localhost/')).toBe(false)
+  })
+
+  it('blocks every bare IP literal (loopback/private/link-local/metadata + any public IP)', () => {
+    expect(isQuarantineFetchAllowed('https://127.0.0.1/')).toBe(false)
+    expect(isQuarantineFetchAllowed('https://0.0.0.0/')).toBe(false)
+    expect(isQuarantineFetchAllowed('https://10.0.0.5/')).toBe(false)
+    expect(isQuarantineFetchAllowed('https://172.16.0.1/')).toBe(false)
+    expect(isQuarantineFetchAllowed('https://192.168.1.1/')).toBe(false)
+    expect(isQuarantineFetchAllowed('https://169.254.169.254/latest/meta-data/')).toBe(false)
+    expect(isQuarantineFetchAllowed('https://8.8.8.8/')).toBe(false)
+    expect(isQuarantineFetchAllowed('https://[::1]/')).toBe(false)
+    expect(isQuarantineFetchAllowed('https://[fd00::1]/')).toBe(false)
+  })
+
+  it('blocks unparseable input', () => {
+    expect(isQuarantineFetchAllowed('not a url')).toBe(false)
+    expect(isQuarantineFetchAllowed('')).toBe(false)
+  })
+})
+
+describe('shouldBlockWebFetch (agent-scoped gate)', () => {
+  const noList = { domains: [], prefixes: [] }
+
+  it('gives the quarantine-reader the widened Tier-2 rule', () => {
+    const qr = (url: string) =>
+      shouldBlockWebFetch({ tool_name: 'WebFetch', agent_type: 'quarantine-reader', tool_input: { url } }, noList)
+    expect(qr('https://example.com/article')).toBe(false) // arbitrary domain: ALLOWED for QR
+    expect(qr('https://hnrss.org/frontpage')).toBe(false)
+    expect(qr('https://169.254.169.254/')).toBe(true) // SSRF metadata: BLOCKED even for QR
+    expect(qr('https://localhost:3420/')).toBe(true) // localhost: BLOCKED even for QR
+    expect(qr('http://example.com/')).toBe(true) // non-https: BLOCKED even for QR
+  })
+
+  it('keeps the narrow allowlist for the main agent (no agent_type)', () => {
+    const main = (url: string) =>
+      shouldBlockWebFetch({ tool_name: 'WebFetch', tool_input: { url } }, noList)
+    expect(main('https://api.github.com/x')).toBe(false) // built-in allowlist: allowed
+    expect(main('https://example.com/article')).toBe(true) // arbitrary domain: BLOCKED for main
+    expect(main('https://hnrss.org/frontpage')).toBe(true)
+  })
+
+  it('does NOT widen for any other sub-agent -- only quarantine-reader', () => {
+    // The whole point: a Bash/file-capable agent must never get direct broad web
+    // egress. An unrecognised or absent agent_type falls through to the narrow path.
+    const other = (agent_type: string | undefined, url: string) =>
+      shouldBlockWebFetch({ tool_name: 'WebFetch', agent_type, tool_input: { url } }, noList)
+    expect(other('general-purpose', 'https://example.com/')).toBe(true)
+    expect(other('Explore', 'https://attacker.com/?data=secret')).toBe(true)
+    expect(other(undefined, 'https://example.com/')).toBe(true)
+    expect(other('quarantine-reader-evil', 'https://example.com/')).toBe(true) // exact match only
+  })
+
+  it('ignores non-WebFetch tools regardless of agent', () => {
+    expect(shouldBlockWebFetch({ tool_name: 'Bash', agent_type: 'quarantine-reader', tool_input: { url: 'x' } }, noList)).toBe(false)
+    expect(shouldBlockWebFetch({ tool_name: 'Read', tool_input: {} }, noList)).toBe(false)
+  })
+})
+
 describe('isEgressBlocked', () => {
   it('only fires on WebFetch tool, not Bash or others', () => {
     expect(isEgressBlocked('Bash', { command: 'curl https://evil.com' })).toBe(false)

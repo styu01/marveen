@@ -33,6 +33,14 @@ import { readFileSync, appendFileSync, mkdirSync } from 'node:fs'
 import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { isIP } from 'node:net'
+
+// The Task/Agent-tool sub-agent whose WebFetch calls carry this exact
+// `agent_type` in the PreToolUse payload. Claude Code sets the field from the
+// spawned subagent_type -- it is NOT settable from agent/prompt/web content, so
+// it cannot be spoofed by prompt injection reaching a main agent. Only this
+// sub-agent (WebFetch-only, quarantined output) gets the widened Tier-2 rule.
+const QUARANTINE_READER_AGENT_TYPE = 'quarantine-reader'
 
 // Derive repo root from this script's location (scripts/hooks/egress-gate.mjs).
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -139,6 +147,46 @@ export function isEgressBlocked(toolName, toolInput, runtimeList = { domains: []
   return true
 }
 
+// Tier-2 rule for the quarantine-reader sub-agent ONLY: any https:// URL to a
+// real domain name is allowed, but never an SSRF target. The quarantine-reader
+// has only the WebFetch tool and returns wrapped, never-executed content, so
+// broad READ access is safe -- but it must not become an SSRF oracle for
+// internal / loopback / cloud-metadata endpoints. Blocks (returns false) unless:
+//   - the scheme is https (no http/file/ftp/gopher), AND
+//   - the hostname is NOT localhost, AND
+//   - the hostname is NOT a bare IP literal (isIP != 0). A raw IP covers every
+//     loopback/private/link-local/metadata case (127/8, 10/8, 172.16/12,
+//     192.168/16, 169.254/16 incl. 169.254.169.254, 0.0.0.0, ::1) in one check,
+//     and article/blog links are domain names anyway, so a raw-IP target is a
+//     red flag regardless of range.
+export function isQuarantineFetchAllowed(url) {
+  let parsed
+  try {
+    parsed = new URL(String(url))
+  } catch {
+    return false
+  }
+  if (parsed.protocol !== 'https:') return false
+  let host = parsed.hostname.toLowerCase()
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1) // ipv6 literal
+  if (host === 'localhost' || host.endsWith('.localhost')) return false
+  if (isIP(host) !== 0) return false
+  return true
+}
+
+// Agent-scoped gate decision. The quarantine-reader sub-agent (identified by the
+// runtime-set agent_type, see QUARANTINE_READER_AGENT_TYPE) gets the widened
+// Tier-2 rule; every other caller -- main agents and their own direct WebFetch,
+// any other sub-agent -- stays on the narrow built-in + runtime allowlist. An
+// absent or unrecognised agent_type falls through to the narrow path (fail-safe).
+export function shouldBlockWebFetch(payload, runtimeList = { domains: [], prefixes: [] }) {
+  if (payload?.tool_name !== 'WebFetch') return false
+  if (payload?.agent_type === QUARANTINE_READER_AGENT_TYPE) {
+    return !isQuarantineFetchAllowed(payload?.tool_input?.url ?? '')
+  }
+  return isEgressBlocked(payload?.tool_name, payload?.tool_input, runtimeList)
+}
+
 function logBlocked(url, reason) {
   try {
     mkdirSync(join(REPO_ROOT, 'store'), { recursive: true })
@@ -158,6 +206,12 @@ const BLOCK_MESSAGE =
   'Ha ez a hívás jogos, az operátor jóváhagyhatja: adja hozzá az URL-t vagy domain-t a ' +
   'store/egress-allowlist.json fájlhoz ({ "domains": ["example.com"] } vagy ' +
   '{ "prefixes": ["https://example.com/api/"] }), majd futtassa újra a WebFetch hívást.'
+
+const QUARANTINE_BLOCK_MESSAGE =
+  'Egress TILTOTT (egress-gate, quarantine-reader SSRF-guard). A quarantine-reader ' +
+  'bármely https:// URL-t lekérhet egy valódi domain-névről, DE nem érhet el SSRF-célt: ' +
+  'nem-https séma, `localhost`, vagy bármilyen nyers IP-cím (loopback/privát/link-local/' +
+  'metadata, pl. 169.254.169.254) TILTOTT. A letiltott hívás rögzítve a store/egress-blocked.log-ban.'
 
 function allow() { process.exit(0) }
 
@@ -191,9 +245,10 @@ if (isInvokedDirectly()) {
   }
   const url = String(payload?.tool_input?.url ?? '')
   const runtimeList = loadRuntimeAllowlist()
-  if (isEgressBlocked(payload?.tool_name, payload?.tool_input, runtimeList)) {
-    logBlocked(url, 'not on egress allowlist')
-    deny(BLOCK_MESSAGE)
+  if (shouldBlockWebFetch(payload, runtimeList)) {
+    const isQuarantine = payload?.agent_type === QUARANTINE_READER_AGENT_TYPE
+    logBlocked(url, isQuarantine ? 'quarantine-reader SSRF guard (non-https or IP/localhost host)' : 'not on egress allowlist')
+    deny(isQuarantine ? QUARANTINE_BLOCK_MESSAGE : BLOCK_MESSAGE)
   }
   allow()
 }
