@@ -39,6 +39,7 @@
 
 import { readFileSync, appendFileSync, mkdirSync } from 'node:fs'
 import { realpathSync } from 'node:fs'
+import { isIP } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -109,46 +110,38 @@ const ALLOWED_PREFIXES = [
 // empty, unknown or misspelled value is treated as a main agent, i.e. blocked.
 // A mistake here can only deny a fetch, never grant one.
 //
-// The domain list mirrors the one in the sub-agent's own definition
-// (templates/sub-agents/quarantine-reader.md). That copy is a promise the
-// sub-agent makes to itself in its prompt; this one is enforcement. Keep them
-// in step -- and when they disagree, this file is the one that decides.
 const QUARANTINE_AGENT_TYPE = 'quarantine-reader'
 
-// `path` (optional) narrows a domain to the URLs the sub-agent's definition
-// actually promises. Reddit is the reason it exists: the definition allows RSS
-// feeds only, and hostname matching alone would hand over the entire site.
-const QUARANTINE_DOMAINS = [
-  { domain: 'status.anthropic.com' },
-  { domain: 'status.claude.com' },
-  { domain: 'feeds.feedburner.com' },
-  { domain: 'rss.arxiv.org' },
-  { domain: 'export.arxiv.org' },
-  { domain: 'hnrss.org' },
-  { domain: 'feeds.arstechnica.com' },
-  { domain: 'techcrunch.com' },
-  { domain: 'feeds.reuters.com' },
-  { domain: 'feeds.bbci.co.uk' },
-  { domain: 'www.reddit.com', path: (p) => p.endsWith('.rss') },
-]
-
-function matchesQuarantineDomain(url, extraDomains = []) {
+// Tier-2 rule (widened 2026-08-06/19, Istvan-approved -- see
+// templates/sub-agents/quarantine-reader.md's "Tier 2" section, the sub-agent's
+// own promise, kept in step with this enforcement): a fixed per-domain
+// allowlist meant every ad-hoc article/blog URl Istvan pastes needed a
+// one-off store/egress-allowlist.json edit first. Now ANY https:// URL to a
+// real domain is allowed, but never an SSRF target -- the quarantine-reader
+// has only the WebFetch tool and returns wrapped, never-executed content, so
+// broad READ access is safe as long as it cannot become an SSRF oracle for
+// internal / loopback / cloud-metadata endpoints. Blocks (returns false)
+// unless:
+//   - the scheme is https (no http/file/ftp/gopher), AND
+//   - the hostname is NOT localhost, AND
+//   - the hostname is NOT a bare IP literal (isIP != 0). A raw IP covers every
+//     loopback/private/link-local/metadata case (127/8, 10/8, 172.16/12,
+//     192.168/16, 169.254/16 incl. 169.254.169.254, 0.0.0.0, ::1) in one check,
+//     and article/blog links are domain names anyway, so a raw-IP target is a
+//     red flag regardless of range.
+export function isQuarantineFetchAllowed(url) {
   let parsed
   try {
-    parsed = new URL(url)
+    parsed = new URL(String(url))
   } catch {
     return false
   }
-  const hostMatches = (d) => parsed.hostname === d || parsed.hostname.endsWith('.' + d)
-  for (const entry of QUARANTINE_DOMAINS) {
-    if (!hostMatches(entry.domain)) continue
-    if (entry.path && !entry.path(parsed.pathname)) return false
-    return true
-  }
-  // Operator additions carry no path rule: an entry someone typed into the
-  // store file is a deliberate act, and second-guessing its shape here would
-  // only make the file's behaviour harder to predict.
-  return extraDomains.some(hostMatches)
+  if (parsed.protocol !== 'https:') return false
+  let host = parsed.hostname.toLowerCase()
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1) // ipv6 literal
+  if (host === 'localhost' || host.endsWith('.localhost')) return false
+  if (isIP(host) !== 0) return false
+  return true
 }
 
 // Load the runtime allowlist from store/egress-allowlist.json.
@@ -161,16 +154,10 @@ export function loadRuntimeAllowlist() {
     return {
       domains: Array.isArray(parsed.domains) ? parsed.domains.filter((d) => typeof d === 'string') : [],
       prefixes: Array.isArray(parsed.prefixes) ? parsed.prefixes.filter((p) => typeof p === 'string') : [],
-      // Operator-managed extension of the QUARANTINE tier. Reachable ONLY by
-      // the quarantine-reader sub-agent -- putting a domain here does not open
-      // it to the main agent, which is the whole point of the split.
-      quarantineDomains: Array.isArray(parsed.quarantine_domains)
-        ? parsed.quarantine_domains.filter((d) => typeof d === 'string')
-        : [],
     }
   } catch {
     // Missing file or JSON parse error: treat as empty, never propagate.
-    return { domains: [], prefixes: [], quarantineDomains: [] }
+    return { domains: [], prefixes: [] }
   }
 }
 
@@ -191,7 +178,7 @@ export function loadRuntimeAllowlist() {
 export function egressDecision(
   toolName,
   toolInput,
-  runtimeList = { domains: [], prefixes: [], quarantineDomains: [] },
+  runtimeList = { domains: [], prefixes: [] },
   agentType = '',
 ) {
   if (toolName !== 'WebFetch') return { blocked: false, tier: 'not-webfetch' }
@@ -225,9 +212,10 @@ export function egressDecision(
 
   // 4. Quarantine tier -- the ONLY tier a main agent cannot reach. Exact
   //    agent_type match required (fail-closed: anything else falls through to
-  //    the block below).
+  //    the block below). isQuarantineFetchAllowed is the SSRF-guarded "any
+  //    https domain" rule, not a fixed allowlist -- see its own doc comment.
   if (String(agentType ?? '') === QUARANTINE_AGENT_TYPE) {
-    if (matchesQuarantineDomain(url, runtimeList.quarantineDomains ?? [])) {
+    if (isQuarantineFetchAllowed(url)) {
       return { blocked: false, tier: 'quarantine' }
     }
   }
@@ -285,6 +273,15 @@ const BLOCK_MESSAGE =
   'store/egress-allowlist.json fájlhoz ({ "domains": ["example.com"] } vagy ' +
   '{ "prefixes": ["https://example.com/api/"] }), majd futtassa újra a WebFetch hívást.'
 
+// Distinct message for a quarantine-reader denial: the reason is the SSRF
+// guard, not "not on the allowlist" -- the generic BLOCK_MESSAGE would tell
+// the reader to route through itself, which is exactly what it already did.
+const QUARANTINE_BLOCK_MESSAGE =
+  'Egress TILTOTT (egress-gate, quarantine-reader SSRF-guard). A quarantine-reader ' +
+  'bármely https:// URL-t lekérhet egy valódi domain-névről, DE nem érhet el SSRF-célt: ' +
+  'nem-https séma, `localhost`, vagy bármilyen nyers IP-cím (loopback/privát/link-local/' +
+  'metadata, pl. 169.254.169.254) TILTOTT. A letiltott hívás rögzítve a store/egress-blocked.log-ban.'
+
 function allow() { process.exit(0) }
 
 function deny(reason) {
@@ -320,8 +317,9 @@ if (isInvokedDirectly()) {
   const runtimeList = loadRuntimeAllowlist()
   const decision = egressDecision(payload?.tool_name, payload?.tool_input, runtimeList, agentType)
   if (decision.blocked) {
-    logLine('BLOCKED', url, 'reason="not on egress allowlist"', payloadKeySignature(payload), agentType)
-    deny(BLOCK_MESSAGE)
+    const isQuarantineCaller = agentType === QUARANTINE_AGENT_TYPE
+    logLine('BLOCKED', url, isQuarantineCaller ? 'reason="quarantine-reader SSRF guard"' : 'reason="not on egress allowlist"', payloadKeySignature(payload), agentType)
+    deny(isQuarantineCaller ? QUARANTINE_BLOCK_MESSAGE : BLOCK_MESSAGE)
   }
   // Audited, not silent: the quarantine tier is the one grant a main agent
   // cannot obtain, so every use of it leaves a line next to the denials. The

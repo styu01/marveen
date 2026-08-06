@@ -14,10 +14,10 @@
 // side effects.
 import { describe, it, expect } from 'vitest'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { isEgressBlocked, egressDecision, payloadKeySignature } from '../../scripts/hooks/egress-gate.mjs'
+import { isEgressBlocked, egressDecision, payloadKeySignature, isQuarantineFetchAllowed } from '../../scripts/hooks/egress-gate.mjs'
 
 const QUARANTINE = 'quarantine-reader'
-const EMPTY = { domains: [], prefixes: [], quarantineDomains: [] }
+const EMPTY = { domains: [], prefixes: [] }
 
 describe('what the gate lets through', () => {
   it('passes a built-in allowed prefix', () => {
@@ -58,12 +58,24 @@ describe('what the gate lets through', () => {
 // The tier that made the gate's own escape hatch usable. A sub-agent payload
 // carries `agent_type`, a main agent's does not (measured 2026-08-03) -- that
 // field, and nothing else, separates the two.
+//
+// Tier 2 widening (2026-08-06/19, Istvan-approved -- see
+// templates/sub-agents/quarantine-reader.md's "Tier 2" section): a fixed
+// per-domain allowlist meant every ad-hoc article/blog URL Istvan pastes
+// needed a one-off store/egress-allowlist.json edit first. Replaced with
+// isQuarantineFetchAllowed: ANY https:// URL to a real domain, guarded only
+// against SSRF targets (non-https, localhost, bare IP literals). This is a
+// deliberate, narrower-scope departure from a fixed allowlist, not a bug --
+// see docs/marveen-v1.34.1-hybrid-merge-dev-spec.md for why this specific
+// tier kept the fork's policy instead of adopting main's.
 describe('the quarantine tier', () => {
   const feed = { url: 'https://techcrunch.com/feed/' }
 
-  it('lets the quarantine-reader fetch a feed on its list', () => {
+  it('lets the quarantine-reader fetch any https domain, not just a fixed list', () => {
     expect(isEgressBlocked('WebFetch', feed, EMPTY, QUARANTINE)).toBe(false)
     expect(egressDecision('WebFetch', feed, EMPTY, QUARANTINE).tier).toBe('quarantine')
+    // A domain that was never on any allowlist -- the whole point of Tier 2.
+    expect(isEgressBlocked('WebFetch', { url: 'https://some-blog-istvan-pasted.example/post' }, EMPTY, QUARANTINE)).toBe(false)
   })
 
   it('STILL blocks the same url for a main agent', () => {
@@ -74,10 +86,6 @@ describe('the quarantine tier', () => {
     expect(isEgressBlocked('WebFetch', feed, EMPTY, undefined)).toBe(true)
   })
 
-  it('blocks a domain the quarantine-reader was never given', () => {
-    expect(isEgressBlocked('WebFetch', { url: 'https://evil.example/feed' }, EMPTY, QUARANTINE)).toBe(true)
-  })
-
   it('fails closed on anything that is not an exact agent_type match', () => {
     // A typo, a rename, a spoofed-looking value: all fall through to the
     // block. A mistake here can only deny a fetch, never grant one.
@@ -86,23 +94,13 @@ describe('the quarantine tier', () => {
     }
   })
 
-  it('holds the reddit promise its definition makes: RSS only', () => {
-    // The sub-agent's definition allows reddit RSS feeds; hostname matching
-    // alone would hand over the whole site, including the json endpoints a
-    // main agent was blocked from earlier.
+  it('reddit is no longer RSS-only -- any path on any https domain passes for the quarantine-reader', () => {
     expect(isEgressBlocked('WebFetch', { url: 'https://www.reddit.com/r/devops/new.rss' }, EMPTY, QUARANTINE)).toBe(false)
-    expect(isEgressBlocked('WebFetch', { url: 'https://www.reddit.com/r/devops/about/rules.json' }, EMPTY, QUARANTINE)).toBe(true)
+    expect(isEgressBlocked('WebFetch', { url: 'https://www.reddit.com/r/devops/about/rules.json' }, EMPTY, QUARANTINE)).toBe(false)
   })
 
   it('inherits the ordinary allowlist rather than replacing it', () => {
     expect(isEgressBlocked('WebFetch', { url: 'https://api.github.com/x' }, EMPTY, QUARANTINE)).toBe(false)
-  })
-
-  it('takes operator additions from quarantine_domains -- for the sub-agent only', () => {
-    const list = { domains: [], prefixes: [], quarantineDomains: ['feeds.example.org'] }
-    expect(isEgressBlocked('WebFetch', { url: 'https://feeds.example.org/rss' }, list, QUARANTINE)).toBe(false)
-    // Putting a domain in the quarantine list must not open it to a main agent.
-    expect(isEgressBlocked('WebFetch', { url: 'https://feeds.example.org/rss' }, list, '')).toBe(true)
   })
 
   it('reports the tier so the grant can be audited', () => {
@@ -111,6 +109,37 @@ describe('the quarantine tier', () => {
     expect(egressDecision('WebFetch', { url: 'https://api.github.com/x' }, EMPTY, QUARANTINE).tier).toBe('builtin')
     expect(egressDecision('WebFetch', feed, EMPTY, QUARANTINE).tier).toBe('quarantine')
     expect(egressDecision('WebFetch', feed, EMPTY, '').tier).toBe('none')
+  })
+})
+
+// isQuarantineFetchAllowed directly: the SSRF guard is the only thing left
+// gating this tier, so it needs its own thorough coverage.
+describe('isQuarantineFetchAllowed: the SSRF guard', () => {
+  it('allows any https domain', () => {
+    expect(isQuarantineFetchAllowed('https://example.com/whatever')).toBe(true)
+    expect(isQuarantineFetchAllowed('https://sub.example.co.uk/path?q=1')).toBe(true)
+  })
+
+  it('rejects non-https schemes', () => {
+    expect(isQuarantineFetchAllowed('http://example.com/')).toBe(false)
+    expect(isQuarantineFetchAllowed('ftp://example.com/')).toBe(false)
+    expect(isQuarantineFetchAllowed('file:///etc/passwd')).toBe(false)
+  })
+
+  it('rejects localhost and its subdomains', () => {
+    expect(isQuarantineFetchAllowed('https://localhost/')).toBe(false)
+    expect(isQuarantineFetchAllowed('https://foo.localhost/')).toBe(false)
+  })
+
+  it('rejects bare IP literals -- covers loopback/private/link-local/metadata in one check', () => {
+    for (const ip of ['127.0.0.1', '10.0.0.1', '172.16.0.1', '192.168.1.1', '169.254.169.254', '0.0.0.0']) {
+      expect(isQuarantineFetchAllowed(`https://${ip}/`)).toBe(false)
+    }
+    expect(isQuarantineFetchAllowed('https://[::1]/')).toBe(false)
+  })
+
+  it('rejects an unparseable URL instead of throwing', () => {
+    expect(isQuarantineFetchAllowed('not a url')).toBe(false)
   })
 })
 
