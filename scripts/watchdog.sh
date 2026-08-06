@@ -180,6 +180,23 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
     continue
   fi
 
+  # Cross-process respawn coordination (2026-08-06 audit): if the dashboard just
+  # (re)started this agent -- restartAgentProcess stamps
+  # store/.agent-<id>-last-respawn BEFORE it stops the old session -- the new
+  # session may not have re-appeared yet. Defer rather than race a duplicate
+  # `tmux new-session` for the same name. The 60s grace covers the dashboard
+  # stop->start window plus our detection lag; the dashboard's own runners still
+  # cover a genuine crash that happens to land inside the grace.
+  RESPAWN_STAMP="$INSTALL_DIR/store/.agent-${AGENT_ID}-last-respawn"
+  if [ -f "$RESPAWN_STAMP" ]; then
+    _rlast="$(stat -c %Y "$RESPAWN_STAMP" 2>/dev/null || echo 0)"
+    _rnow="$(date +%s)"
+    if [ "$(( _rnow - _rlast ))" -lt 60 ]; then
+      echo "$(timestamp) [watchdog] $AGENT_ID (re)spawned $(( _rnow - _rlast ))s ago by another actor (< 60s grace), deferring" >> "$LOG"
+      continue
+    fi
+  fi
+
   echo "$(timestamp) [watchdog] $AGENT_ID missing, restarting..." >> "$LOG"
 
   resolve_agent_provider "$AGENT_DIR"
@@ -220,6 +237,10 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
 
   if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     echo "$(timestamp) [watchdog] $AGENT_ID restarted OK" >> "$LOG"
+    # Stamp our own spawn so the shared timestamp always means "last respawn by
+    # ANY actor" (keeps a later watchdog cycle / any future dashboard-side check
+    # from immediately racing this fresh session).
+    touch "$RESPAWN_STAMP" 2>/dev/null || true
     REPLAY_OUT=$(replay_unfinished_messages "$AGENT_ID" "$SESSION_NAME" 2>&1)
     [ -n "$REPLAY_OUT" ] && echo "$(timestamp) $REPLAY_OUT" >> "$LOG"
   else
