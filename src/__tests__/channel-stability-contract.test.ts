@@ -79,6 +79,22 @@ describe('P1#3 — .bun/bin PATH on every claude (re)spawn path', () => {
   })
 })
 
+describe('P1#4 — DISABLE_AUTOUPDATER=1 on every claude (re)spawn path (2026-08-05 incident)', () => {
+  // A sub-agent whose claude auto-updater fires does an in-place `npm i -g` into
+  // the shared global nvm prefix and can corrupt the ONE claude install the whole
+  // fleet resolves through (500-byte stub + dropped bin symlink). Every path that
+  // launches a claude must disable the updater.
+  it('agent-process.ts sub-agent launch disables the auto-updater', () => {
+    expect(read('src/web/agent-process.ts')).toMatch(/DISABLE_AUTOUPDATER=1/)
+  })
+  it('watchdog.sh fallback sub-agent spawn disables the auto-updater', () => {
+    expect(read('scripts/watchdog.sh')).toMatch(/DISABLE_AUTOUPDATER=1/)
+  })
+  it('channels.sh main-agent launch disables the auto-updater', () => {
+    expect(read('scripts/channels.sh')).toMatch(/DISABLE_AUTOUPDATER=1/)
+  })
+})
+
 describe('P2#4 — independent systemd-timer watchdog', () => {
   const sh = read('scripts/channel-watchdog.sh')
   const timer = read('scripts/systemd/channel-watchdog.timer')
