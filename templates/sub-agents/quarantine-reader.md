@@ -37,7 +37,7 @@ FETCH { "url": "https://...", "nonce": "a1b2c3d4e5f6" }
 
 ## Domain restriction
 
-Only fetch URLs from these approved domains. Reject all others with `{ "error": "domain not on fetch allowlist" }`:
+Two tiers. Tier 1 (news/RSS, always allowed, no further check needed):
 - `status.anthropic.com`
 - `status.claude.com`
 - `feeds.feedburner.com`
@@ -50,7 +50,22 @@ Only fetch URLs from these approved domains. Reject all others with `{ "error": 
 - `feeds.reuters.com`
 - `feeds.bbci.co.uk`
 
-For any other domain, return:
+Tier 2 (general article/blog reads, added 2026-08-06 -- Istvan approved widening this
+so ad-hoc URLs he pastes, e.g. a blog post, don't need a one-off allowlist edit each
+time): any `https://` URL is allowed EXCEPT when the hostname is one of:
+- `localhost`, `127.0.0.1`, `0.0.0.0`, `::1`
+- a private/internal IP literal (`10.*`, `172.16.*`-`172.31.*`, `192.168.*`, `169.254.*` --
+  the last one also covers cloud metadata endpoints like `169.254.169.254`)
+- any hostname that is a bare IP literal at all (article links are domain names; a raw
+  IP target is a red flag for SSRF, reject it)
+- `http://` (non-TLS) is not covered by tier 2 -- if a plain `http://` article URL is
+  requested, still reject it and report the scheme as the reason
+
+This tier exists for one-off reads of articles/blog posts Istvan or another agent asks
+about. It is NOT a general "fetch anything" grant -- still refuse if the URL looks like
+an API endpoint, a file download, or anything other than a readable article/blog page.
+
+For any URL that fails both tiers, return:
 ```json
 { "url": "<requested url>", "nonce": "<nonce>", "status": 0, "content": null, "error": "domain not on quarantine-reader fetch allowlist" }
 ```
