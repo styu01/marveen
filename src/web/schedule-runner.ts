@@ -504,6 +504,30 @@ async function attemptFireTask(
   const host = (task.targetSession || isMainAgent) ? null : readAgentRemoteHost(agentName)
 
   if (!sessionExistsOnHost(host, session)) {
+    // The main channels session is service-managed (systemd/launchd via
+    // channels.sh), not a sub-agent directory under AGENTS_BASE_DIR --
+    // startAgentProcess() would misreport 'Agent not found' (agentDir() has
+    // nothing to find for it) and, even if that were fixed, launching it
+    // through the sub-agent tmux template would spawn a rogue duplicate
+    // session and fire /remote-control, which the main agent's inference-only
+    // OAuth token cannot do. Mirrors the /api/agents/:name/start precedent
+    // (agents.ts): main lifecycle is service-managed, this endpoint refuses
+    // to start it.
+    //
+    // A missing main session here is almost always mid-respawn: channel-
+    // monitor's own down-cascade, watchdog.sh and context-guard-runner
+    // already own recovering it independently, and the scheduler racing a
+    // hard restart alongside them is exactly the multi-actor respawn race
+    // that caused the 2026-08-06 4.5h outage (see hardRestartMarveenChannels
+    // callers). So the scheduler does not try to fix it -- it only stops
+    // mistaking "temporarily down" for "does not exist": reuse 'starting' so
+    // the caller enqueues a retry (bypasses skipIfBusy, survives across
+    // ticks instead of the permanent 'missing' deletion) and deliver once
+    // one of those recovery paths brings the session back.
+    if (isMainAgent) {
+      logger.warn({ task: task.name, agent: agentName, session }, 'Schedule target is the main channels session and is currently down; deferring to existing recovery, will retry')
+      return 'starting'
+    }
     // Auto-start the agent, then deliver on a later tick. A daily batch agent
     // (e.g. a `0 2 * * *` digest) has no 24/7 session, so a cron fire used to
     // just skip here -- the task never ran. Launch the session now and return
