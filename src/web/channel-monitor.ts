@@ -1081,6 +1081,21 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   const parkedView = paneState === 'typing' ? captureParkedInputView(MAIN_CHANNELS_SESSION) : null
   const machineOrigin = parkedView != null && parkedMachineOriginInput(parkedView)
   const softRemedy = parkedView != null && parkedMainInputHasRemedy(parkedView)
+  // TEMPORARY diagnostic (card TBD, approved by Istvan 2026-08-18): the
+  // 'typing'+machineOrigin:false carve-out has been observed firing almost
+  // every tick since 2026-08-17 22:10, which the existing log line does not
+  // explain because it never records WHAT is actually parked. Log a bounded
+  // excerpt of the parked text so the recurring pattern can be identified and,
+  // if it is a legitimate delivery format missing from MACHINE_ORIGIN_PREFIXES
+  // (pane-state.ts), a concrete whitelist patch can be proposed. Remove this
+  // block once the pattern is identified -- it is not meant to ship long-term.
+  if (parkedView != null) {
+    const sample = parkedInputText(parkedView)
+    logger.info(
+      { machineOrigin, sampleLength: sample?.length ?? 0, sample: sample?.slice(0, 220) ?? null },
+      'DIAG stuck-input parked-text sample',
+    )
+  }
   const action = applyStuckRestartBusyGuard(paneState, decideStuckInputRestart(
     parked, state.attempts, MAIN_STUCK_THRESHOLDS.maxAttempts,
     Date.now(), lastStuckRestartAt, stuckRestartCount,
