@@ -42,6 +42,7 @@ import {
   type AgentRunState,
 } from './ssh-tmux.js'
 import { parseTelegramToken } from './telegram.js'
+import { recordSentText } from './sent-text-registry.js'
 import { getProvider, getProviderType, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { CHANNEL_PROVIDER, MAIN_AGENT_ID, STORE_DIR, PROJECT_ROOT, SUBAGENT_INBOX_TEE } from '../config.js'
 import { getEffectiveSettingValue } from '../settings-store.js'
@@ -1892,6 +1893,13 @@ export async function sendPromptToSession(
   }
 
   const oneLine = text.replace(/\r?\n/g, ' ')
+  // Record what we're about to type, for the machine-origin fallback check
+  // (channel-monitor.ts / sent-text-registry.ts) -- see that module's header
+  // comment for why this exists: the TUI's own input box can auto-scroll a
+  // long line out of view, and no amount of extra capture-pane scrollback
+  // recovers it (measured 2026-08-19), so the classifier needs to know what
+  // was ACTUALLY sent, not only what is currently visible.
+  recordSentText(session, oneLine)
   const CHUNK = 80
   // Stream oneLine into the pane as CHUNK-sized literal send-keys writes,
   // followed by a submitting Enter. Extracted as a closure so the
