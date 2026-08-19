@@ -40,6 +40,7 @@ import {
   type StuckInputActionFacts,
 } from '../pane-state.js'
 import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
+import { isKnownRecentInjection } from './sent-text-registry.js'
 import { notifyChannel } from '../notify.js'
 import { getProvider, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { attemptChannelMcpReconnect } from './channel-mcp-reconnect.js'
@@ -1079,7 +1080,22 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   // Deadlock carve-out facts: read from the ghost-stripped parked view (same
   // view the soft recovery uses) so a dim autocomplete hint never counts.
   const parkedView = paneState === 'typing' ? captureParkedInputView(MAIN_CHANNELS_SESSION) : null
-  const machineOrigin = parkedView != null && parkedMachineOriginInput(parkedView)
+  const machineOriginByPrefix = parkedView != null && parkedMachineOriginInput(parkedView)
+  // Fallback (card d8c16050, measured 2026-08-19): the prefix-anchored check
+  // above only sees whatever is currently visible in the TUI's own bounded
+  // input-box view, which can be a LATER fragment of a long injected line,
+  // not its true opening. A live A/B capture-pane test (plain vs. -S -200
+  // scrollback) on a genuine stuck state confirmed the missing opening text
+  // is never recoverable from more scrollback -- it was never painted to a
+  // terminal row that persists. sent-text-registry.ts tracks what
+  // sendPromptToSession() actually typed into each session; if the visible
+  // fragment is a substring of a recent (< 10 min) known send, it is
+  // machine-origin too, even though it didn't start with a known prefix.
+  // Only consulted when the fast prefix check already missed.
+  const parkedFragment = parkedView != null ? parkedInputText(parkedView) : null
+  const machineOriginByRegistry = !machineOriginByPrefix && parkedFragment != null
+    && isKnownRecentInjection(MAIN_CHANNELS_SESSION, parkedFragment)
+  const machineOrigin = machineOriginByPrefix || machineOriginByRegistry
   const softRemedy = parkedView != null && parkedMainInputHasRemedy(parkedView)
   // TEMPORARY diagnostic (card TBD, approved by Istvan 2026-08-18): the
   // 'typing'+machineOrigin:false carve-out has been observed firing almost
@@ -1090,9 +1106,36 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   // (pane-state.ts), a concrete whitelist patch can be proposed. Remove this
   // block once the pattern is identified -- it is not meant to ship long-term.
   if (parkedView != null) {
-    const sample = parkedInputText(parkedView)
+    const sample = parkedFragment // already computed above for the registry fallback check
+    // TEMPORARY diagnostic addition (approved by Istvan 2026-08-19, same
+    // diagnostic-only intent as the block above): capture-pane -p above only
+    // ever sees the CURRENTLY VISIBLE screen (no -S), so when machineOrigin
+    // comes back false the open question is WHY -- is the missing prefix
+    // sitting just above in real tmux scrollback (recoverable by widening the
+    // capture), or was it never actually painted to any terminal row at all
+    // because the TUI's own input box redraws a bounded viewport in place
+    // (cursor-addressed repaint, not terminal-native scroll)? A wider,
+    // scrollback-inclusive capture answers this empirically on the next
+    // genuine wedge: if SCHEDULED_TASK_PREAMBLE's opening line shows up in
+    // scrollbackSample but not in sample, it was real scrollback loss (fix:
+    // widen the read). If it does not appear there either, it was never on
+    // any row (fix: track the actually-injected text via a side-channel
+    // instead of re-deriving it from a screen scrape). Purely additive --
+    // does not feed any decision here, logged for the NEXT occurrence only.
+    // Remove alongside the block above once the pattern is settled.
+    let scrollbackSample: string | null = null
+    try {
+      const wide = execFileSync(TMUX, ['capture-pane', '-t', MAIN_CHANNELS_SESSION, '-p', '-S', '-200'], { timeout: 5000, encoding: 'utf-8' })
+      scrollbackSample = wide.slice(-1200)
+    } catch (err) {
+      logger.warn({ err }, 'DIAG scrollback capture-pane failed (diagnostic only, no behaviour impact)')
+    }
     logger.info(
-      { machineOrigin, sampleLength: sample?.length ?? 0, sample: sample?.slice(0, 220) ?? null },
+      {
+        machineOrigin, machineOriginByPrefix, machineOriginByRegistry,
+        sampleLength: sample?.length ?? 0, sample: sample?.slice(0, 220) ?? null,
+        scrollbackSample,
+      },
       'DIAG stuck-input parked-text sample',
     )
   }
