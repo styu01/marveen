@@ -1304,6 +1304,17 @@ export function parkedMachineOriginInput(pane: string): boolean {
     || MACHINE_ORIGIN_TRUNCATED_MARKERS.some((rx) => rx.test(flat))
 }
 
+// The two MACHINE_ORIGIN_PREFIXES entries that specifically identify a
+// scheduled-task delivery (as opposed to any other machine-origin message,
+// e.g. an inter-agent notice). Exported so sent-text-registry.ts's fallback
+// check can apply the SAME classification to the FULL originally-sent text
+// (which always has its true opening line intact), not just the visible,
+// possibly-scrolled pane fragment.
+export const SCHEDULED_TASK_ORIGIN_PREFIXES = [
+  /^SCHEDULED TASK NOTICE/,
+  /^<scheduled-task[\s>]/,
+] as const
+
 // True when the parked text is a scheduled-task injection (the scheduler's
 // wrapper or a bare <scheduled-task> block). Scheduled tasks are (near
 // always) RECURRING: dropping one parked tick is harmless -- the next
@@ -1314,7 +1325,7 @@ export function parkedMachineOriginInput(pane: string): boolean {
 export function parkedScheduledTaskInput(pane: string): boolean {
   const flat = parkedInputText(pane)
   if (flat == null) return false
-  if (/^SCHEDULED TASK NOTICE/.test(flat) || /^<scheduled-task[\s>]/.test(flat)) return true
+  if (SCHEDULED_TASK_ORIGIN_PREFIXES.some((rx) => rx.test(flat))) return true
   // Head dropped by the TUI -- see MACHINE_ORIGIN_TRUNCATED_MARKERS. Clear-only
   // is exactly as safe here as for an intact tick: the instruction is already
   // corrupted by the truncation, and the next schedule fire re-delivers it.
@@ -1614,7 +1625,17 @@ export function decideStuckInputAction(f: StuckInputActionFacts): StuckInputActi
 // defer forever or the channel goes permanently mute (2026-07-25 hermes
 // incident: parked multi-row scheduled-task -> hold + 'typing' deferred both
 // the stuck-input hard restart AND the keepalive-staleness respawn).
-export function parkedMainInputHasRemedy(pane: string): boolean {
+//
+// `extraScheduledTaskEvidence` (2026-08-26, Kanban c4aef78c): the caller may
+// pass additional, session-aware evidence that the parked text IS a
+// scheduled-task delivery even though parkedScheduledTaskInput() (prefix-
+// anchored to what is CURRENTLY VISIBLE in the box) missed it -- e.g. a
+// sent-text-registry match confirming the FULL originally-sent text (which
+// always has its true, un-scrolled opening line) was scheduled-task-wrapped.
+// This module stays dependency-free (no registry import here); the caller
+// does that lookup and passes in a plain boolean. Defaults to false so every
+// existing call site is unaffected.
+export function parkedMainInputHasRemedy(pane: string, extraScheduledTaskEvidence: boolean = false): boolean {
   const block = parkedChannelInput(pane)
   const facts: StuckInputActionFacts = {
     escalate: true,
@@ -1624,7 +1645,7 @@ export function parkedMainInputHasRemedy(pane: string): boolean {
     truncatedPreamble: shouldClearTruncatedPreamble(pane),
     allowPlainReinject: false,
     hasPlainText: false,
-    scheduledTaskBlock: parkedScheduledTaskInput(pane),
+    scheduledTaskBlock: parkedScheduledTaskInput(pane) || extraScheduledTaskEvidence,
     machineOrigin: parkedMachineOriginInput(pane),
   }
   return decideStuckInputAction(facts) !== 'hold'

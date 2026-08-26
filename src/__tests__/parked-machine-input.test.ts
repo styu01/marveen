@@ -99,6 +99,32 @@ const PARKED_HUMAN_DRAFT_ABOUT_SCHEDULING = [
 
 const IDLE = ['', SEP, '❯ ', SEP, FOOTER].join('\n')
 
+// 2026-08-25/26 incident (Kanban c4aef78c): the box shows a SCROLLED,
+// mid-block fragment of a scheduled-task delivery -- the true opening line
+// ("SCHEDULED TASK NOTICE...") has scrolled out of the TUI's bounded
+// input-box view, same mechanism as the machineOrigin scroll issue card
+// d8c16050 fixed, but here affecting the scheduledTaskBlock/softRemedy
+// classification instead. Mirrors the real captured sample from
+// dashboard.log (15:00-15:05, 2026-08-25).
+//
+// Deliberately holds NEITHER end of the wrapper: no opening
+// "SCHEDULED TASK NOTICE" / "<scheduled-task" line (scrolled out, same as
+// PARKED_SCHEDULED_FRONT_TRUNCATED above) AND no closing "</scheduled-task>"
+// tag either -- a pure MIDDLE fragment. If the closing tag were visible here,
+// origin/main's own MACHINE_ORIGIN_TRUNCATED_MARKERS (added independently for
+// the front-truncation fix) would already catch it and this fixture would
+// stop reproducing the bug it exists to demonstrate; the sent-text-registry
+// fallback this test exercises is for the case where NO in-box anchor
+// survives at all.
+const PARKED_SCHEDULED_SCROLLED_FRAGMENT = [
+  '',
+  SEP,
+  '❯ agent-progi -p 2>/dev/null | tail -15` (és ugyanezt agent-okoska-ra is).',
+  '  Ha a kimenetben "session limit" szerepel, várj 5 percet és próbáld újra.',
+  SEP,
+  FOOTER,
+].join('\n')
+
 describe('parkedScheduledTaskInput', () => {
   it('detects a parked scheduler wrapper block', () => {
     expect(parkedScheduledTaskInput(PARKED_SCHEDULED_MULTIROW)).toBe(true)
@@ -176,5 +202,21 @@ describe('parkedMainInputHasRemedy', () => {
     // This is the fact that decides between a self-healing clear and a
     // permanently mute channel.
     expect(parkedMainInputHasRemedy(PARKED_SCHEDULED_FRONT_TRUNCATED)).toBe(true)
+  })
+
+  // 2026-08-25/26 incident (Kanban c4aef78c): reproduces the exact false
+  // hard-restart, then confirms the fix (extraScheduledTaskEvidence param).
+  it('BUG REPRODUCTION: a scrolled scheduled-task fragment has NO remedy via the prefix check alone', () => {
+    expect(parkedScheduledTaskInput(PARKED_SCHEDULED_SCROLLED_FRAGMENT)).toBe(false)
+    expect(parkedMainInputHasRemedy(PARKED_SCHEDULED_SCROLLED_FRAGMENT)).toBe(false)
+  })
+
+  it('FIX: extraScheduledTaskEvidence (sent-text-registry fallback) restores the clear-scheduled remedy', () => {
+    expect(parkedMainInputHasRemedy(PARKED_SCHEDULED_SCROLLED_FRAGMENT, true)).toBe(true)
+  })
+
+  it('the extra-evidence param defaults to false -- every pre-existing call site is unaffected', () => {
+    expect(parkedMainInputHasRemedy(PARKED_SCHEDULED_MULTIROW)).toBe(true) // unaffected, prefix already matches
+    expect(parkedMainInputHasRemedy(PARKED_INTERAGENT, false)).toBe(false) // explicit false, same as before
   })
 })
