@@ -596,6 +596,10 @@ async function attemptFireTask(
   lateCatchUpMs?: number,
 ): Promise<'fired' | 'busy' | 'missing' | 'starting' | 'error' | 'mcp-missing' | 'first-run'> {
   const { session, host } = resolveTaskTarget(task, agentName)
+  // resolveTaskTarget() computes this internally but does not expose it (it
+  // only returns {session, host}) -- recompute the same cheap check here
+  // rather than widening that function's return type for one caller.
+  const isMainAgent = agentName === MAIN_AGENT_ID
 
   if (!sessionExistsOnHost(host, session)) {
     // The main channels session is service-managed (systemd/launchd via
