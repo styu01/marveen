@@ -32,19 +32,65 @@ fi
 
 # ---- 2. Claude Code telepítés-ellenőrzés ----------------------------------
 log "2. Claude Code ellenőrzés..."
-# Symlink javítás: ha a local bin törött, linkeljük az nvm-esre
-NVM_CLAUDE="$NVM_DIR/versions/node/$(nvm version 22)/bin/claude"
 LOCAL_CLAUDE="$HOME/.local/bin/claude"
-if [ -f "$NVM_CLAUDE" ] && [ ! -L "$LOCAL_CLAUDE" -o ! -e "$LOCAL_CLAUDE" ]; then
-    log "   symlink javítás: $LOCAL_CLAUDE -> $NVM_CLAUDE"
-    ln -sf "$NVM_CLAUDE" "$LOCAL_CLAUDE"
+# Pinned claude-code version: keep the fleet on ONE known-good version so a
+# self-heal reinstall never silently up/downgrades. Fleet standard (2026-08-05,
+# István-approved): Node 22 + claude-code 2.1.220. Bump here to move the fleet.
+# NOTE: this is the AVX-capable-host pin; fix-avx.sh/install-linux.sh keep a
+# SEPARATE, older CLAUDE_PIN for AVX-less hosts that cannot run the newer build.
+CLAUDE_PIN="2.1.220"
+
+# Find a claude binary that ACTUALLY resolves, preferring the Node 22 nvm tree
+# (fleet standard) but never hard-binding to one nvm version: a missing bin
+# symlink in one tree must not wedge startup when another tree (or ~/.local/bin)
+# has a live claude. `-e` follows symlinks, so a dangling link is treated as
+# absent -- not accepted as "live". (root-caused 2026-08-05: the old logic keyed
+# off a single $(nvm version 22)/bin/claude path that did not exist, so the
+# self-heal branch never fired and a broken symlink stayed broken.)
+find_live_claude() {
+    local c
+    for c in \
+        "$NVM_DIR/versions/node/$(nvm version 22 2>/dev/null)/bin/claude" \
+        "$NVM_DIR"/versions/node/*/bin/claude \
+        "$LOCAL_CLAUDE"; do
+        [ -n "$c" ] && [ -e "$c" ] && { echo "$c"; return 0; }
+    done
+    return 1
+}
+
+# Repair ~/.local/bin/claude ONLY if it is missing or dangling (never flip a
+# working link -- deliberate version pivots are a separate operation).
+if [ ! -L "$LOCAL_CLAUDE" ] || [ ! -e "$LOCAL_CLAUDE" ]; then
+    if LIVE_CLAUDE="$(find_live_claude)"; then
+        log "   symlink javítás: $LOCAL_CLAUDE -> $LIVE_CLAUDE"
+        mkdir -p "$(dirname "$LOCAL_CLAUDE")"
+        ln -sf "$LIVE_CLAUDE" "$LOCAL_CLAUDE"
+    fi
 fi
+
 if ! claude --version &>/dev/null; then
-    log "   claude nem található, telepítés..."
-    npm install -g @anthropic-ai/claude-code --prefer-offline 2>/dev/null ||     curl -L https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.195.tgz -o /tmp/claude-code.tgz && npm install -g /tmp/claude-code.tgz 2>/dev/null || {
-        log "FATAL: claude telepítés sikertelen"
-        exit 1
-    }
+    log "   claude nem található, telepítés (flock-olva, pin: @$CLAUDE_PIN)..."
+    # Serialize the global install fleet-wide: parallel `npm install -g` into the
+    # same nvm prefix races the atomic extract+rename and can orphan a staging
+    # dir / skip the bin symlink (root-caused 2026-08-05). One installer at a time.
+    (
+        flock -w 180 9 || { log "FATAL: npm-install lock nem megszerezhető"; exit 1; }
+        npm install -g "@anthropic-ai/claude-code@$CLAUDE_PIN" --prefer-offline 2>/dev/null \
+          || { curl -fsSL "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-$CLAUDE_PIN.tgz" -o /tmp/claude-code.tgz \
+                 && npm install -g /tmp/claude-code.tgz 2>/dev/null; } \
+          || { log "FATAL: claude telepítés sikertelen"; exit 1; }
+    ) 9>/tmp/claude-npm-install.lock
+    # Verify the bin symlink materialised -- the race symptom is a present package
+    # with NO bin/claude link. Recreate from the package's own bin if missing
+    # (matches npm's own relative link shape).
+    NVM_BIN_DIR="$NVM_DIR/versions/node/$(nvm version 22)/bin"
+    if [ ! -e "$NVM_BIN_DIR/claude" ] && [ -e "$NVM_BIN_DIR/../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe" ]; then
+        log "   bin symlink hiányzik az install után, pótlás: $NVM_BIN_DIR/claude"
+        ln -sf ../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe "$NVM_BIN_DIR/claude"
+    fi
+    if [ ! -L "$LOCAL_CLAUDE" ] || [ ! -e "$LOCAL_CLAUDE" ]; then
+        if LIVE_CLAUDE="$(find_live_claude)"; then ln -sf "$LIVE_CLAUDE" "$LOCAL_CLAUDE"; fi
+    fi
 fi
 CLAUDE_BIN="$(command -v claude)"
 log "   claude OK: $CLAUDE_BIN ($(claude --version 2>/dev/null || echo 'version unknown'))"
