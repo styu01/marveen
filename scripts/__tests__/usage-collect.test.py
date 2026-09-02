@@ -1026,6 +1026,82 @@ class TestStatuslineCache(unittest.TestCase):
             (None, None),
         )
 
+    def test_five_hour_override_lets_slow_moving_window_through(self):
+        """2026-09-02 follow-up (two live usage-monitor heartbeats ~2h
+        apart, BÉLA): five_hour turned out to plateau the same way
+        seven_day did, just over a shorter natural period -- during an idle
+        gap between scheduled polls the rounded percentage doesn't move, so
+        collected_at_unix can sit unchanged across several 10-minute poll
+        cycles even on a healthy tracker. A per-window override must let a
+        stale-LOOKING but otherwise valid five_hour window through."""
+        self._write({
+            "windows": {
+                "five_hour": self._window(44, 1234, age_seconds=20 * 60),     # 20 min old
+                "seven_day": self._window(8, 5678, age_seconds=60),           # 1 min old
+            },
+        })
+        windows, age = uc._read_statusline_cache(15, {"five_hour": 45})
+        self.assertIsNotNone(windows)
+        self.assertEqual(windows["five_hour"]["used_percent"], 44)
+        self.assertAlmostEqual(age, 20.0, delta=0.2)
+
+    def test_five_hour_still_stale_beyond_its_own_override_ceiling(self):
+        """The override raises the ceiling, it doesn't remove it -- a
+        five_hour window older than ITS OWN 45-minute override must still
+        reject the whole cache."""
+        self._write({
+            "windows": {
+                "five_hour": self._window(44, 1234, age_seconds=46 * 60),     # 46 min old > 45 min override
+                "seven_day": self._window(8, 5678, age_seconds=60),
+            },
+        })
+        self.assertEqual(
+            uc._read_statusline_cache(15, {"five_hour": 45}),
+            (None, None),
+        )
+
+    def test_five_hour_override_does_not_affect_seven_day_override(self):
+        """Both per-window overrides coexist independently -- configuring
+        five_hour's 45-minute ceiling must not disturb seven_day's separate
+        8-hour one (or vice versa)."""
+        self._write({
+            "windows": {
+                "five_hour": self._window(44, 1234, age_seconds=20 * 60),      # 20 min old, under 45 min
+                "seven_day": self._window(8, 5678, age_seconds=34 * 60),       # 34 min old, under 8h
+            },
+        })
+        windows, age = uc._read_statusline_cache(15, {"five_hour": 45, "seven_day": 8 * 60})
+        self.assertIsNotNone(windows)
+        self.assertEqual(windows["five_hour"]["used_percent"], 44)
+        self.assertEqual(windows["seven_day"]["used_percent"], 8)
+
+    def test_configured_five_hour_override_is_45_minutes(self):
+        """Pins the actual production CONFIG value (not just the function's
+        generic override mechanism) -- catches an accidental edit of the
+        constant itself going unnoticed."""
+        self.assertEqual(
+            uc.CONFIG["claude_statusline_cache_max_age_min_by_window"]["five_hour"],
+            45,
+        )
+
+    def test_combined_stale_five_hour_and_fresh_seven_day_resolves_authoritative(self):
+        """End-to-end (real production CONFIG, not a passed-in override):
+        a five_hour window that is stale-by-value under its 45-minute
+        ceiling, alongside a fresh seven_day window, must still resolve
+        collect_claude() to source=authoritative_statusline -- both windows
+        independently satisfy their own configured ceiling, so neither
+        should drag the other down."""
+        self._write({
+            "windows": {
+                "five_hour": self._window(44, 1234, age_seconds=20 * 60),   # 20 min old, under 45 min ceiling
+                "seven_day": self._window(8, 5678, age_seconds=120),        # 2 min old, well under 8h ceiling
+            },
+        })
+        result = uc.collect_claude()
+        self.assertEqual(result["source"], "authoritative_statusline")
+        self.assertEqual(result["windows"]["five_hour"]["used_percent"], 44)
+        self.assertEqual(result["windows"]["seven_day"]["used_percent"], 8)
+
     def test_no_override_argument_preserves_prior_default_behavior(self):
         """Backward-compat: every pre-existing call site passes only the
         first argument -- max_age_overrides must default to None and behave

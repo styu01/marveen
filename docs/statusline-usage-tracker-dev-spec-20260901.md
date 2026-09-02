@@ -634,3 +634,53 @@ unaffected. Verified live, not just in isolated tests: a manual
 `python3 scripts/usage-collect.py` run immediately after the fix reported
 `source: authoritative_statusline` with real percentages (91% five_hour,
 21% seven_day) instead of the false `estimate` fallback.
+
+### 8.8 The "five_hour updates often enough" assumption from 8.7 was wrong (2026-09-02, BUILT)
+
+8.7 explicitly kept `five_hour` on the 15-minute default, reasoning it
+"updates often enough that a real outage should still be caught quickly."
+That assumption held for exactly one usage-monitor heartbeat cycle. BÉLA
+observed the same false-stale pattern on `five_hour` itself twice within
+the same session, ~2 hours apart (11:30 and 12:30 CEST):
+
+- 11:10->11:30: `five_hour` sat at a rounded 7% for the whole span (no
+  active work happening in that window), so `collected_at_unix` never
+  advanced past the 11:10 poll -- by the 11:30 usage-monitor tick the
+  file was 20 minutes old, tripping the 15-minute ceiling even though the
+  tracker session itself polled correctly at 11:10/11:20/11:30 (confirmed
+  in `store/dashboard.log`: `Scheduled task fired` for `usage-tracker-poll`
+  logged on schedule all three times -- the poller was never the problem,
+  the rounded-percentage-unchanged behavior was).
+- 12:10->12:30: same shape. `five_hour` moved 25%->44% between the 12:00
+  and 12:10 polls (heavy investigation work in progress), then sat at 44%
+  through the 12:20 poll (quiet gap waiting on the next heartbeat tick),
+  so the file was 20 minutes stale again by 12:30.
+
+Root cause is identical to 8.7, just with a shorter natural period: any
+window whose real usage is bursty (active work in short strides, long
+idle gaps between scheduled heartbeats) can sit on the same rounded
+integer percentage across multiple 10-minute tracker-poll cycles.
+`five_hour`'s 300-minute span makes each percentage point worth ~3
+minutes of *continuous* consumption, but consumption during idle waiting
+periods is zero, so multi-cycle plateaus are normal, not a sign of a dead
+tracker.
+
+**Fix (István approved, "mehet", 2026-09-02):** add a `five_hour` entry to
+`CONFIG["claude_statusline_cache_max_age_min_by_window"]`. Kept
+deliberately narrower than `seven_day`'s 8 hours -- `five_hour`'s own
+window is only 5 hours long, so an 8-hour ceiling would be nonsensical
+(it could ride an entire reset cycle on a stale number). 45 minutes: wide
+enough to absorb the two observed 20-minute plateaus with real margin,
+short enough that a genuinely dead tracker session is still caught well
+inside the 5-hour window (at most ~15% of the window's own length spent
+possibly-stale, vs. the previous 15-minute ceiling's ~5%).
+
+Tests to add in `usage-collect.test.py`, mirroring 8.7's five: a
+five_hour window stale-by-value under the new 45-minute override is
+accepted; a five_hour window older than 45 minutes still rejects (ceiling
+is real, not removed); seven_day's existing 8-hour override is untouched
+by this change; the production CONFIG constant for `five_hour` is pinned
+at 45 so an accidental edit doesn't go unnoticed; a combined case where
+seven_day is fresh but five_hour is stale-by-value under 45 min still
+resolves to `authoritative_statusline` (both windows independently
+satisfy their own ceiling).

@@ -92,6 +92,24 @@ CONFIG = {
         # catch a genuinely dead tracker session well before a stale number
         # could mislead anyone.
         "seven_day": 8 * 60,
+        # five_hour found false-stale in production too, 2026-09-02 (BÉLA,
+        # two separate usage-monitor heartbeats ~2h apart, 11:30 and 12:30
+        # CEST): same root cause as seven_day above, just a shorter natural
+        # period. five_hour's 300-minute span makes each rounded percentage
+        # point worth ~3 minutes of *continuous* consumption -- during an
+        # idle gap between scheduled polls (no active work) the value simply
+        # doesn't move, so collected_at_unix can sit unchanged across
+        # several 10-minute tracker-poll cycles even on a perfectly healthy
+        # tracker (confirmed via store/dashboard.log: the tracker's own
+        # scheduled poll fired on time at every tick in both incidents; the
+        # poller was never the problem). 45 minutes: wide enough to absorb
+        # the observed ~20-minute plateaus with real margin, but kept
+        # deliberately narrower than seven_day's 8 hours -- five_hour's own
+        # window is only 5 hours long, so an 8-hour ceiling would be
+        # nonsensical (it could ride out an entire reset cycle on a stale
+        # number). A genuinely dead tracker is still caught well inside the
+        # 5-hour window.
+        "five_hour": 45,
     },
 }
 
