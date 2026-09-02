@@ -684,3 +684,129 @@ at 45 so an accidental edit doesn't go unnoticed; a combined case where
 seven_day is fresh but five_hour is stale-by-value under 45 min still
 resolves to `authoritative_statusline` (both windows independently
 satisfy their own ceiling).
+
+### 8.9 Chasing the ceiling number was the wrong lens; add an independent liveness signal (2026-09-02, István approved "mehet most" -- REJECTED before implementation, see 8.10)
+
+Within the SAME session as 8.8, `five_hour` plateaued a THIRD time --
+50 minutes this time, already past the just-widened 45-minute ceiling,
+while the tracker session's own poll fired on schedule at every one of
+five consecutive 10-minute ticks (confirmed live in the tmux pane: the
+session's own rendered statusLine bar showed the identical flat number,
+not a hang). István's reaction, paraphrased: "just stamp the file on
+every poll" -- correct instinct, wrong literal implementation. Claude
+Code's own `refreshInterval` mechanism (8.3) re-invokes
+statusline-usage-export.py on ITS OWN timer independent of our poll, with
+NO field in the stdin payload distinguishing "a genuine new API turn just
+landed" from "re-render of the same old cached state" (documented in the
+script's own module docstring). Stamping on every invocation would make a
+genuinely DEAD tracker session look eternally fresh, exactly the unsafe
+failure mode 8.6/8.7 deliberately avoided.
+
+The real fix: a SECOND, independent liveness signal that ISN'T subject to
+that ambiguity -- our own `usage-tracker-poll` scheduled task's run log
+(`store/schedule-last-run.json`, key `"usage-tracker-poll"`, epoch ms,
+already written by the dashboard's schedule-runner every time the task
+fires, unrelated to statusline-usage-export.py or refreshInterval). A
+recent entry there proves a genuine new user-turn was just delivered to
+the tracker session (a scheduled-task fire is never a refreshInterval
+no-op), independent of whether the account's rounded percentage happened
+to move.
+
+**Design:** a window passes freshness if EITHER the existing per-window
+`collected_at_unix` ceiling is satisfied (8.7/8.8, unchanged, still the
+primary/preferred path) OR all three of: (a) `schedule-last-run.json`'s
+`usage-tracker-poll` timestamp is within
+`claude_statusline_poll_liveness_max_age_min` (new CONFIG key, 20 --
+double the 10-minute poll cron, one missed tick of slack) minutes of now;
+(b) the window's `collected_at_unix` is NOT after that poll timestamp
+(sanity: a value claiming to be newer than our last confirmed poll is a
+data-ordering bug, never trust it via this path); (c) `now < resets_at`
+for that window (never let a plateaued value ride across its own reset
+boundary into a new cycle it was never measured in). This is additive --
+it only WIDENS acceptance, never narrows the existing 8.7/8.8 path, and
+the partial-payload protection (both windows must be present with a valid
+numeric percentage) is untouched.
+
+Implementation: new helper `_read_tracker_poll_liveness()` in
+usage-collect.py reads `store/schedule-last-run.json` (same directory
+convention as the other store/ state files already read in this script),
+returns the age in minutes of the `"usage-tracker-poll"` entry or `None`
+if missing/unparseable/not-a-number. `_read_statusline_cache()`'s
+per-window loop gains the OR-branch above. `result["source"]` gains a
+distinguishing marker when a window was accepted via the liveness path
+rather than its own ceiling (e.g. `statusline_liveness_corroborated:
+true` alongside the existing `statusline_age_min`), so a future
+investigator can tell which path resolved trust without re-deriving it
+from raw timestamps.
+
+Tests to add: liveness path accepts a five_hour window stale-by-value
+beyond its 45-minute ceiling when the poll log is recent; liveness path
+REJECTS the same case if the poll log is ALSO stale (>20 min, both
+signals must independently fail together for a true reject); sanity
+guard (b) rejects a `collected_at_unix` newer than the recorded poll
+timestamp even if both individual ages look fine (data-ordering bug
+guard); reset-boundary guard (c) rejects a plateaued value once
+`resets_at` has passed even with a fresh poll log; missing/corrupt
+`schedule-last-run.json` falls back to the original ceiling-only
+behavior (no new failure mode introduced); the original 8.7/8.8 ceiling
+path still resolves trust on its own without needing the new liveness
+path at all (regression guard -- the OR's first branch keeps working
+standalone).
+
+### 8.10 8.9 rejected before shipping -- "fired" is dispatch, not success-ack (2026-09-02, István requested Codex review)
+
+István asked for an independent Codex review of 8.9 before PROGI finished
+implementing it (same federated-peer pattern as 8.6/8.7's earlier review
+rounds). Codex found a real trust-boundary flaw, and BÉLA independently
+confirmed it against the actual source before accepting the verdict
+(never take a review finding, or a "this is fine" self-check, on faith
+alone):
+
+`schedule-last-run.json`'s `usage-tracker-poll` timestamp is written by
+`scheduleLastRun.set(task.name, now)` in `schedule-runner.ts`, called
+IMMEDIATELY after `sendPromptToSession(...)` returns (`schedule-runner.ts`
+~862-863). `sendPromptToSession()` itself (`agent-process.ts`) returns as
+soon as the prompt text has been chunk-sent into the tmux pane via
+`send-keys` -- it has no knowledge of whether Claude Code went on to
+produce a completed turn, hung, hit an auth/rate-limit error, or the pane
+was mid-restart. The codebase has NO "completed"/"success-ack" status for
+scheduled tasks at all: `appendTaskRun()`'s only recorded outcomes are
+`fired` / `fired_late` / `error` / `lost` / `skipped` / `missing-retrying`
+/ `missed` -- `fired` is dispatch, not delivery, and nothing downstream
+of it proves a real API response landed.
+
+This inverts 8.9's guard (b) exactly the wrong way: instead of protecting
+against a stale value riding on a fresh claim, it would let a genuinely
+stale `collected_at_unix` get validated against an unproven *dispatch*
+timestamp that says nothing about whether a real, fresh `rate_limits`
+payload was ever received. Codex's concrete failure modes (runner
+records dispatch before the session processes it; pane busy/restarting
+so the injected text never runs as its own turn; auth/network/rate-limit
+error swallows the response; runner only observes "callback completed"
+not "Claude turn completed"; a schedule key surviving a tracker
+session/account regeneration while the cache still holds the old
+session's stale value) are all real and none of them are exotic edge
+cases -- they're the normal operating conditions of a long-running
+scheduled task against a shared, sometimes-busy pane.
+
+**Decision: 8.9 is NOT implemented.** Building a genuine success-ack
+signal (a completion event that only fires after Claude Code confirms a
+real turn finished, tied to a stable tracker session/generation
+identity, per Codex's suggested schema) would require new
+schedule-runner plumbing -- disproportionate effort for what is, in
+practice, a low-stakes cosmetic issue: the "estimate" fallback this whole
+8.7/8.8/8.9 arc has been chasing is EXPLICITLY documented as the SAFE
+failure mode (statusline-usage-export.py's own module docstring: "falls
+back to a worse source unnecessarily (safe), never serves a stale number
+as if fresh (unsafe)"). The practical cost of an occasional false
+"estimate" reading is a few minutes of coarser-precision display in a
+cache file mainly read by this heartbeat script itself -- not a real
+operational risk. 8.7 and 8.8 (the per-window ceiling widenings,
+seven_day 8h and five_hour 45min) remain in place and verified live;
+only the poll-liveness OR-branch from 8.9 is withdrawn. PROGI's
+in-progress implementation was stopped and reverted before any commit.
+
+If this class of false-stale reading keeps recurring badly enough to
+matter operationally, the right fix is building the real success-ack
+signal properly (as its own scoped project, not a same-day bolt-on) --
+not another indirect proxy. Until then: no further chasing.
