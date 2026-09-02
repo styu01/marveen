@@ -4,7 +4,8 @@ import { listAgentNames, readAgentRemoteHost } from './agent-config.js'
 import { isAgentRunning, captureParkedInputView, sendEnterToSession, capturePane } from './agent-process.js'
 import { resolveAgentSession } from './channel-mcp-reconnect.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
-import { recoverStuckInputForSession, sendAlert } from './channel-monitor.js'
+import { recoverStuckInputForSession } from './channel-monitor.js'
+import { escalateToOwner, clearOwnerEscalation } from './owner-escalation.js'
 import {
   stuckInputSignature,
   parkedPasteSignature,
@@ -111,10 +112,19 @@ const INTERVAL_MS = 15_000
 const NO_STATE: StuckInputState = { parkedSig: null, firstSeenAt: null, lastRecoverAt: null, attempts: 0 }
 
 const watchState = new Map<string, StuckInputState>()
-// One owner alert per spell (RIASZTASZAJ819): entries live while a spell is
-// open and are dropped with it, so a NEW spell on the same session alerts
-// again. Not persisted -- a dashboard restart may re-alert once, acceptable.
+// One WARN log per spell (RIASZTASZAJ819): entries live while a spell is
+// open and are dropped with it, so a NEW spell on the same session logs
+// again. Not persisted -- a dashboard restart may re-log once, acceptable.
+// The actual owner-alert dedup/timing lives in owner-escalation.ts's own
+// per-key state now (see checkLocalSession) -- this Set only gates the log.
 const alertedSpells = new Set<string>()
+
+// Stable identity for this watcher's escalations, namespaced so a future
+// second alert type on the same session (e.g. a different watcher) can
+// never collide with this one's stage-1/stage-2 timers.
+function ownerEscalationKey(session: string): string {
+  return `stuck-input:${session}`
+}
 
 // Backstop for a PARKED `[Pasted text #N]` placeholder -- a long inbound prompt
 // (e.g. a scheduled-task notice > ~700 chars) the TUI collapsed into a paste
@@ -234,6 +244,7 @@ async function checkLocalSession(label: string, session: string, alertOnGiveUp: 
   if (next.parkedSig === null) {
     watchState.delete(session)
     alertedSpells.delete(session)
+    clearOwnerEscalation(ownerEscalationKey(session))
   } else {
     watchState.set(session, next)
     if (alertOnGiveUp && next.attempts >= LOCAL_FAST_THRESHOLDS.maxAttempts) {
@@ -244,15 +255,29 @@ async function checkLocalSession(label: string, session: string, alertOnGiveUp: 
       // alert). Recovery attempts above are untouched; only the alert gates.
       const pane = capturePane(session)
       const paneState = pane != null ? detectPaneState(pane) : null
-      if (shouldAlertParkedGiveUp({
+      // alreadyAlerted is always false here now (kanban cf12a93a): the
+      // one-alert-per-spell dedup this used to gate on moved into
+      // escalateToOwner's own per-key state (BÉLA-first, then Istvan only if
+      // unresolved -- Istvan's standing rule, 2026-09-02). This call is now
+      // purely the busy-pane eligibility gate; alertedSpells below is kept
+      // ONLY to dedup the warn log (still once per spell), not the alert
+      // itself.
+      const eligible = shouldAlertParkedGiveUp({
         attempts: next.attempts,
         maxAttempts: LOCAL_FAST_THRESHOLDS.maxAttempts,
-        alreadyAlerted: alertedSpells.has(session),
+        alreadyAlerted: false,
         paneState,
-      })) {
-        alertedSpells.add(session)
-        logger.warn({ label, session, paneState }, 'stuck-input-watcher: sub-agent input still parked after max recovery attempts at a non-busy pane, alerting for manual restart')
-        sendAlert(`⚠️ A(z) ${label} agens bemenete beragadt és az auto-recovery (Enter + clear/re-inject) nem szabadította ki. Valószínűleg kézi restart kell: POST /api/agents/${label}/restart vagy a dashboardon.`)
+      })
+      if (eligible) {
+        if (!alertedSpells.has(session)) {
+          alertedSpells.add(session)
+          logger.warn({ label, session, paneState }, 'stuck-input-watcher: sub-agent input still parked after max recovery attempts at a non-busy pane, escalating')
+        }
+        escalateToOwner({
+          key: ownerEscalationKey(session),
+          belaText: `[stuck-input] A(z) ${label} agens (${session}) bemenete beragadt, az auto-recovery (Enter + clear/re-inject) nem szabadította ki. Ha tudsz, oldd fel (POST /api/agents/${label}/restart), különben Istvan direkt Telegram-ertesitest kap ha ez tovabb tart.`,
+          ownerText: `⚠️ A(z) ${label} agens bemenete beragadt és az auto-recovery (Enter + clear/re-inject) nem szabadította ki. BÉLA mar ertesitve volt errol, de nem oldodott meg. Valószínűleg kézi restart kell: POST /api/agents/${label}/restart vagy a dashboardon.`,
+        })
       } else if (paneState === 'busy' && prev.attempts < LOCAL_FAST_THRESHOLDS.maxAttempts) {
         // Once per spell, at the crossing tick: say WHY no alert went out, so
         // a real wedge investigation finds the suppression instead of a hole.

@@ -55,6 +55,7 @@ import { resolveOpenRouterModel } from './openrouter-models.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
+import { escalateToOwner, clearOwnerEscalation } from './owner-escalation.js'
 
 // Lazy so a transient PATH gap at import time (e.g. the 04:00 auto-update
 // restart, where the finalizer omits the bin dir from PATH) cannot hard-crash
@@ -116,6 +117,67 @@ export function ownChannelProviderForScope(
   resolvedProvider: string | null,
 ): string | null {
   return hasOwnToken && resolvedProvider ? resolvedProvider : null
+}
+
+// The ONE designated exception to stripUnsafeStatusLine below: a fully
+// dedicated, isolated usage-tracker session that (by construction, see
+// docs/statusline-usage-tracker-dev-spec-20260901.md section 5 and
+// docs/usage-tracking-full-operational-analysis-20260901.md section 1.4)
+// nothing ever targets for prompt delivery, busy/idle-gated decisions, or
+// inter-agent messages -- so the confirmed esc-to-interrupt-suppression
+// regression (section 4.1 of the same dev-spec) has no automation watching
+// it to misfire on.
+//
+// Deliberately a hardcoded, code-level allowlist here, NOT a per-agent
+// config field (e.g. `allowStatusLine: true` in agent-config.json). A
+// config field would let the exact protection this guard exists for be
+// silently disabled by an accidental/careless config edit -- no code
+// review, no test suite, no diff to catch it. Requiring a source change
+// (this line, reviewed and tested like any other) to add a new exemption
+// keeps the bar for "which sessions may carry statusLine" as high as the
+// bar for everything else this guard protects. A Set (not a single string
+// constant) so a second dedicated tracker-style agent, if one is ever
+// deliberately added later, is a one-line addition here rather than a
+// signature change.
+export const STATUSLINE_ALLOWED_AGENTS: ReadonlySet<string> = new Set(['usage-tracker'])
+
+// Pure: should stripUnsafeStatusLine run for this agent name at all? Kept
+// separate from the strip operation itself (mirrors shouldAbandon/
+// shouldEscalateStuckSession elsewhere in this file: a pure decision,
+// directly unit-testable, composed with the mechanical transform at the
+// call site) rather than folding the allowlist check into
+// stripUnsafeStatusLine's own signature.
+export function shouldStripStatusLine(name: string): boolean {
+  return !STATUSLINE_ALLOWED_AGENTS.has(name)
+}
+
+// Pure: strip a `statusLine` key (and its companion `refreshInterval`, only
+// meaningful alongside it) out of a fleet-managed sub-agent's settings
+// object before every launch. These sessions are scheduler/router-monitored
+// -- pane-state.ts's busy detection depends on the `esc to interrupt`
+// footer hint, which Claude Code's statusLine feature suppresses for a
+// brief window at the start of every turn (confirmed regression, see
+// docs/statusline-usage-tracker-dev-spec-20260901.md section 4.1).
+// statusLine is only safe on a fully dedicated, isolated "usage-tracker"
+// session nothing else ever targets for prompt delivery or busy/idle-gated
+// decisions -- never on a fleet-managed agent. This makes that a technical
+// guarantee instead of a convention someone could forget: if `statusLine`
+// ever ends up in a sub-agent's settings.json (manual edit, a stray
+// copy-paste from the tracker session's own config, a future merge), it
+// gets scrubbed before the session that would be put at risk ever starts.
+// The main agent's own equivalent guard lives in scripts/channels.sh
+// (_ensure_no_statusline) since it launches on a separate path. The ONE
+// exception (the designated usage-tracker agent itself) is gated by
+// shouldStripStatusLine() at the call site, not here -- this function
+// always strips unconditionally when called.
+export function stripUnsafeStatusLine(
+  settings: Record<string, unknown>,
+): { settings: Record<string, unknown>; removed: boolean } {
+  if (!('statusLine' in settings)) return { settings, removed: false }
+  const out = { ...settings }
+  delete out.statusLine
+  delete out.refreshInterval
+  return { settings: out, removed: true }
 }
 
 // Wrap the telegram plugin's bun stdio server in a tee that persists each
@@ -235,13 +297,25 @@ let sharedConfigCollisionAlerted = false
 
 export function resetSharedConfigCollisionAlert(): void {
   sharedConfigCollisionAlerted = false
+  clearOwnerEscalation('shared-config-collision')
 }
 
-// Loud, owner-facing alert routed via notifyChannel (direct Bot API POST from
-// the dashboard process) -- NOT an inter-agent relay, which would itself need a
-// healthy channel agent to deliver. No-op unless the token is absent AND >1
-// RUNNING same-provider channel sub-agent would share ~/.claude (and never on
-// macOS -- see shouldAlertSharedConfigCollision).
+// Kanban cf12a93a (2026-09-02): this used to go straight to notifyChannel
+// (direct Bot API POST), with a comment claiming an inter-agent relay
+// "would itself need a healthy channel agent to deliver". That reasoning
+// doesn't actually hold up under inspection: countSameProviderChannelContenders
+// explicitly EXCLUDES MAIN_AGENT_ID from the contender count (see its filter
+// above) -- BÉLA is never one of the colliding sub-agents, and inter-agent
+// message delivery (message-router.ts's tmux-inject path) is independent of
+// any channel plugin's health anyway (BÉLA's own channels session receives
+// inter-agent notices via the SQLite queue + direct pane injection, not
+// through the Telegram/Slack bot plugin). Flagging this explicitly since it
+// silently overrides a previously-documented design decision -- if there
+// was a different, still-valid reason for going direct here that this
+// change missed, it should surface in review rather than be silently lost.
+// No-op unless the token is absent AND >1 RUNNING same-provider channel
+// sub-agent would share ~/.claude (and never on macOS -- see
+// shouldAlertSharedConfigCollision).
 function maybeAlertSharedConfigCollision(name: string): void {
   const count = countSameProviderChannelContenders(name)
   if (!shouldAlertSharedConfigCollision(false, count) || sharedConfigCollisionAlerted) return
@@ -250,9 +324,11 @@ function maybeAlertSharedConfigCollision(name: string): void {
     { name, sameProviderContenders: count },
     'isolated-config: fleet OAuth token missing with multiple RUNNING same-provider channel sub-agents -- shared ~/.claude plugin-slot collision, bots may go deaf',
   )
-  void notifyChannel(
-    `⚠️ Flotta-figyelmeztetes: hianyzik a fleet OAuth token (store/.claude-oauth-token), es ${count} AZONOS csatorna-providerü sub-agent fut egyszerre. Izolacio nelkul mind a kozos ~/.claude-ot hasznalja, igy a plugin-slot utkozhet es bot nemulhat el. Javitas: futtasd a \`claude setup-token\`-t, mentsd a store/.claude-oauth-token fajlba, majd inditsd ujra az agenseket.`,
-  ).catch(() => { /* notifyChannel logs internally */ })
+  escalateToOwner({
+    key: 'shared-config-collision',
+    belaText: `[shared-config-collision] Flotta-figyelmeztetes: hianyzik a fleet OAuth token (store/.claude-oauth-token), es ${count} AZONOS csatorna-providerü sub-agent fut egyszerre -- plugin-slot utkozes veszelye. Ha tudsz, futtasd a \`claude setup-token\`-t es mentsd store/.claude-oauth-token-be, kulonben Istvan direkt Telegram-ertesitest kap ha ez tovabb tart.`,
+    ownerText: `⚠️ Flotta-figyelmeztetes: hianyzik a fleet OAuth token (store/.claude-oauth-token), es ${count} AZONOS csatorna-providerü sub-agent fut egyszerre. Izolacio nelkul mind a kozos ~/.claude-ot hasznalja, igy a plugin-slot utkozhet es bot nemulhat el. BÉLA mar ertesitve volt errol. Javitas: futtasd a \`claude setup-token\`-t, mentsd a store/.claude-oauth-token fajlba, majd inditsd ujra az agenseket.`,
+  })
 }
 
 // Per-agent isolated CLAUDE_CONFIG_DIR provisioning (2026-06-26 fleet outage).
@@ -1203,7 +1279,17 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
           scopeProvider,
           s.enabledPlugins as Record<string, boolean> | undefined,
         )
-        writeFileSync(settingsPath, JSON.stringify(s, null, 2))
+        let sClean = s
+        if (shouldStripStatusLine(name)) {
+          const stripped = stripUnsafeStatusLine(s)
+          sClean = stripped.settings
+          if (stripped.removed) {
+            logger.warn({ name }, 'agent-process: removed statusLine from sub-agent settings.json before launch -- this session must never carry it (see statusline-usage-tracker-dev-spec)')
+          }
+        } else if ('statusLine' in s) {
+          logger.info({ name }, 'agent-process: statusLine left intact for the designated usage-tracker agent (STATUSLINE_ALLOWED_AGENTS exemption)')
+        }
+        writeFileSync(settingsPath, JSON.stringify(sClean, null, 2))
       } catch (err) {
         logger.warn({ err, name }, 'Could not scope channel plugins for sub-agent')
       }
@@ -2145,6 +2231,10 @@ const UNWEDGE_COOLDOWN_MS = 30_000
 // so escalation is the only recovery; a sub-agent escalates only after the
 // auto-clear has genuinely failed several times.
 const SUBAGENT_PARKED_ESCALATE_AFTER = 6  // ~3min for a sub-agent whose auto-clear keeps failing
+
+function subagentParkedInputEscalationKey(session: string): string {
+  return `subagent-parked-input:${session}`
+}
 // MAINBOXPARK816: two-stage escalation for the (never-cleared) main box. Each
 // fails increment costs one UNWEDGE_COOLDOWN_MS round, so 6 = ~3 min visible to
 // the heartbeat, 12 = ~6 min -> the owner's phone as the FINAL stage (double
@@ -2296,19 +2386,29 @@ export async function clearStaleParkedInput(session: string, host: string | null
     // wedged (not the usual junk heartbeat line the auto-clear handles) -- surface
     // it to the operator ONCE so it cannot stall silently like the 1h main-agent
     // incident did behind a lone WARN.
-    if (!escalated && fails >= SUBAGENT_PARKED_ESCALATE_AFTER) {
+    if (fails >= SUBAGENT_PARKED_ESCALATE_AFTER) {
       const preview = parked.slice(0, 80).replace(/[<>&]/g, ' ')
-      notifyChannel(
-        `⚠️ Egy sub-agent (${session}) input-mezojebe beragadt egy parkolt sor, ` +
-        `az auto-tisztitas ${fails}x sikertelen -- lehet kezi beavatkozas kell. Reszlet: "${preview}"`,
-      ).catch(() => { /* notify is best-effort */ })
+      if (!escalated) {
+        logger.warn({ session, parked: parked.slice(0, 60), fails }, 'message-router: sub-agent parked input resisted clearing -- escalating')
+      }
+      // Kanban cf12a93a (2026-09-02): BÉLA first, Istvan only if unresolved.
+      // `escalated` used to gate this call itself (fire-once); it now only
+      // gates the WARN log above -- escalateToOwner is called on every
+      // qualifying tick and its own per-key state handles the one-shot
+      // stage-1/stage-2 timing, so a later tick past stage2ExtraMs can still
+      // reach Istvan even though `escalated` was already true from stage 1.
+      escalateToOwner({
+        key: subagentParkedInputEscalationKey(session),
+        belaText: `[subagent-parked-input] Egy sub-agent (${session}) input-mezojebe beragadt egy parkolt sor, az auto-tisztitas ${fails}x sikertelen. Ha tudsz, oldd fel, kulonben Istvan direkt Telegram-ertesitest kap ha ez tovabb tart. Reszlet: "${preview}"`,
+        ownerText: `⚠️ Egy sub-agent (${session}) input-mezojebe beragadt egy parkolt sor, az auto-tisztitas ${fails}x sikertelen -- lehet kezi beavatkozas kell. BÉLA mar ertesitve volt errol. Reszlet: "${preview}"`,
+      })
       escalated = true
-      logger.warn({ session, parked: parked.slice(0, 60), fails }, 'message-router: sub-agent parked input resisted clearing -- escalated to operator')
     }
     unwedgeAttempts.set(key, { last: nowMs, sig: parked, fails, escalated })
     logger.warn({ session, parked: parked.slice(0, 60), fails }, 'message-router: parked input resisted clearing, backing off')
     return false
   }
+  clearOwnerEscalation(subagentParkedInputEscalationKey(session))
   unwedgeAttempts.set(key, { last: nowMs, sig: parked, fails: 0, escalated: false })
   logger.warn({ session, parked: parked.slice(0, 60) }, 'message-router: cleared stale parked input (channel un-wedge)')
   return true

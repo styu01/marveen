@@ -31,6 +31,32 @@ export async function notifyChannel(text: string): Promise<void> {
 // Backward-compatible alias
 export const notifyTelegram = notifyChannel
 
+// Kanban cf12a93a (2026-09-02, Codex review round 2): notifyChannel swallows
+// every send failure internally (the inner catch/retry/give-up above never
+// rejects the outer promise) -- fine for a fire-and-forget notice, but WRONG
+// for a caller that needs to know whether delivery actually succeeded before
+// marking its own state "sent" (owner-escalation.ts's stage-2 alert: if the
+// send silently failed and the caller stamped "sent" anyway, it would never
+// retry, and Istvan would never actually receive the escalation). This
+// throws on failure instead of swallowing -- same chunking/formatting/
+// provider-agnostic behavior as notifyChannel, just without the silent
+// give-up. A missing token/chat ID also throws here (notifyChannel treats
+// that as an expected, silently-skippable state; a caller using THIS
+// function explicitly wants to know delivery didn't happen).
+export async function notifyChannelOrThrow(text: string): Promise<void> {
+  if (!CHANNEL_TOKEN || !CHANNEL_CHAT_ID) {
+    throw new Error('Channel ertesites nem lehetseges: token vagy chat ID hianyzik')
+  }
+  const outbound = markIfTestRun(text)
+  const provider = getProvider(CHANNEL_PROVIDER)
+  const formatted = provider.formatMessage(outbound)
+  const chunks = provider.splitMessage(formatted)
+  const parseMode = CHANNEL_PROVIDER === 'telegram' ? 'HTML' : undefined
+  for (const chunk of chunks) {
+    await provider.sendMessage(CHANNEL_TOKEN, CHANNEL_CHAT_ID, chunk, parseMode)
+  }
+}
+
 // Security-event notification (break-glass password reset, security:reset).
 // Unlike notifyChannel, a missing channel config is an EXPECTED state here
 // (fresh installs, channel-less deployments), so it stays fully silent -- the

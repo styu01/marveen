@@ -31,6 +31,7 @@ import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { maybeWakeSubAgentsForTelegram } from './telegram-inbox-wake.js'
+import { readFleetPauseState, shouldHoldForFleetPause, type FleetPauseState } from './usage-fleet-pause.js'
 
 // A message that cannot be delivered within this window (target session never
 // exists / stays busy) is marked failed so it stops clogging the pending
@@ -56,6 +57,12 @@ const routerLoggedMisses: Set<number> = new Set()
 // the orchestrator, so a handoff failure is never silent.
 const routerInjectFailures: Map<number, number> = new Map()
 const MAX_INJECT_FAILURES = 3
+// Message ids already bounced to the orchestrator as "held for usage-fleet-
+// pause" -- notify once per message, not once per 5s retry tick, mirroring
+// routerLoggedMisses. Cleared on every terminal outcome for that message id
+// (delivered/abandoned/failed) alongside routerLoggedMisses so this can
+// never grow unbounded over a long uptime.
+const routerUsagePauseNotified: Set<number> = new Set()
 
 /**
  * Pure decision: has a message exhausted its tmux-inject retries?
@@ -131,6 +138,36 @@ function notifyOrchestratorOfFailedHandoff(msg: AgentMessage, reason: string): v
     logger.warn({ err, id: msg.id }, 'Failed to enqueue handoff-failure notification')
   }
 }
+
+// Surface a held-for-usage-pause delegation to the orchestrator (kanban
+// ff2ed32d) -- "jelezze vissza hogy usage-pause miatt varakozik" from the
+// card description. Notified to MAIN_AGENT_ID (BÉLA), same as the other
+// router notices in this file, rather than back to msg.from_agent directly:
+// BÉLA is the one who actually issues these delegations in the documented
+// flow (see CLAUDE.md's PROGI/OKOSKA/IRIS delegation sections) and is also
+// the one who owns unpausing, so this is the useful place for it to land
+// regardless of who technically sent the message. Fired once per message id
+// (routerUsagePauseNotified), not once per 5s retry tick.
+function notifyOrchestratorOfHeldForUsagePause(msg: AgentMessage, pauseState: FleetPauseState): void {
+  try {
+    if (msg.to_agent === MAIN_AGENT_ID) return // can't happen (not a protected agent), guard anyway
+    const preview = (msg.content ?? '').slice(0, 220)
+    const detail = [
+      pauseState.metric ? `metric=${pauseState.metric}` : null,
+      typeof pauseState.percent === 'number' ? `${pauseState.percent}%` : null,
+      pauseState.source ? `source=${pauseState.source}` : null,
+    ].filter(Boolean).join(', ')
+    createAgentMessage(
+      'system',
+      MAIN_AGENT_ID,
+      `[usage-pause-held] Task delegation (id ${msg.id}) ${msg.from_agent} -> ${msg.to_agent} is being HELD, not delivered -- usage-fleet-pause is active${detail ? ` (${detail})` : ''}. It will deliver automatically once the pause clears (store/.usage-fleet-pause cleared/unpaused); no action needed unless you want to force it through. Content preview: ${preview}`,
+    )
+    logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, pauseState }, 'usage-pause-held surfaced to orchestrator')
+  } catch (err) {
+    logger.warn({ err, id: msg.id }, 'Failed to enqueue usage-pause-held notification')
+  }
+}
+
 // Wakeup cooldown for the main agent: the router fires at most one
 // sendPromptToSession wakeup per COOLDOWN_MS window to avoid spamming the
 // channels session. 45s gives enough headroom that a normal turn (typically
@@ -554,6 +591,7 @@ export async function runMessageRouterTick(): Promise<void> {
         notifyOrchestratorOfFailedHandoff(msg, 'target session was absent for the entire retry window')
         routerInjectFailures.delete(msg.id)
         routerLoggedMisses.delete(msg.id)
+        routerUsagePauseNotified.delete(msg.id)
         continue
       }
 
@@ -630,6 +668,24 @@ export async function runMessageRouterTick(): Promise<void> {
       // Session is ready — clear stuck tracking.
       agentStuckSince.delete(msg.to_agent)
 
+      // ---- usage-fleet-pause enforcement (kanban ff2ed32d) ----
+      // A genuine new-task delegation to a protected sub-agent while
+      // usage-monitor has recorded a 90%+ pause is held -- left pending,
+      // exactly like a busy-target retry -- instead of injected. See
+      // usage-fleet-pause.ts for why this checks the FELADAT: marker
+      // rather than blocking all traffic to the agent.
+      {
+        const pauseState = readFleetPauseState()
+        if (shouldHoldForFleetPause(msg.to_agent, msg.content, pauseState)) {
+          if (!routerUsagePauseNotified.has(msg.id)) {
+            routerUsagePauseNotified.add(msg.id)
+            notifyOrchestratorOfHeldForUsagePause(msg, pauseState)
+            logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, pauseState }, 'message-router: task delegation held for usage-fleet-pause')
+          }
+          continue
+        }
+      }
+
       // Classify (channel-inbound / trusted-peer / untrusted) + reject an empty
       // from_agent -- SINGLE SOURCE in agent-message-wrap so the router and the
       // main-agent pull endpoint frame messages identically (no security drift).
@@ -642,6 +698,7 @@ export async function runMessageRouterTick(): Promise<void> {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
         }
         routerLoggedMisses.delete(msg.id)
+        routerUsagePauseNotified.delete(msg.id)
         continue
       }
       const { category, safeFrom: safeFromAgent } = cls
@@ -708,6 +765,7 @@ export async function runMessageRouterTick(): Promise<void> {
         }
         routerInjectFailures.delete(msg.id)
         routerLoggedMisses.delete(msg.id)
+        routerUsagePauseNotified.delete(msg.id)
         logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, category, traceId: traceCtx?.trace_id }, 'Agent message delivered')
       } catch (err) {
         // An inject throw is usually transient (pane un-ready at the instant of
@@ -727,6 +785,7 @@ export async function runMessageRouterTick(): Promise<void> {
         notifyOrchestratorOfFailedHandoff(msg, `tmux inject failed ${failCount}x`)
         routerInjectFailures.delete(msg.id)
         routerLoggedMisses.delete(msg.id)
+        routerUsagePauseNotified.delete(msg.id)
       }
       } catch (err) {
         logger.warn({ err, id: msg.id, to: msg.to_agent }, 'Agent message processing threw; marking failed so the queue cannot wedge')
@@ -734,6 +793,7 @@ export async function runMessageRouterTick(): Promise<void> {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
         }
         routerLoggedMisses.delete(msg.id)
+        routerUsagePauseNotified.delete(msg.id)
       }
     }
 

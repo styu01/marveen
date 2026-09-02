@@ -65,6 +65,12 @@ CONFIG = {
     "claude_authoritative_cache_max_age_min": 90,  # reuse last authoritative Claude snapshot
                                                     # on a transient failure (429/5xx/timeout)
                                                     # if it's younger than this
+    "claude_statusline_cache_max_age_min": 15,  # a dedicated tracker session's statusLine
+                                                 # export (see statusline-usage-export.py) counts
+                                                 # as authoritative if fresher than this -- generous
+                                                 # enough for a session with no refreshInterval set
+                                                 # (updates are otherwise event-driven only) while
+                                                 # still catching a tracker session that died
 }
 
 # Window length in seconds, keyed by the Claude window's dict key. Codex
@@ -92,6 +98,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STORE_DIR = os.path.join(REPO_ROOT, "store")
 HISTORY_PATH = os.path.join(STORE_DIR, "usage-history.jsonl")
 LATEST_PATH = os.path.join(STORE_DIR, "usage-latest.json")
+STATUSLINE_CACHE_PATH = os.path.join(STORE_DIR, "usage-statusline-latest.json")
 STATE_PATH = os.path.join(STORE_DIR, "usage-alert-state.json")
 ENV_PATH = os.path.join(REPO_ROOT, ".env")
 
@@ -230,10 +237,11 @@ def _window_length_seconds(scope_key, window_data):
 def _iter_pace_windows(snapshot):
     """Yield (scope_key, window_dict, window_len_sec) for every window with
     a usable length, across both providers -- but only from a source worth
-    alerting on (authoritative / authoritative_cached for Claude,
-    authoritative for Codex). Never yields from the token-count estimate."""
+    alerting on (authoritative / authoritative_cached / authoritative_statusline
+    for Claude, authoritative for Codex). Never yields from the token-count
+    estimate."""
     claude = snapshot.get("claude") or {}
-    if claude.get("ok") and claude.get("source") in ("authoritative", "authoritative_cached"):
+    if claude.get("ok") and claude.get("source") in ("authoritative", "authoritative_cached", "authoritative_statusline"):
         for key, w in (claude.get("windows") or {}).items():
             scope_key = f"claude_{key}"
             length = _window_length_seconds(scope_key, w)
@@ -343,7 +351,51 @@ def _read_claude_token():
     Source order matters: the long-lived `claude setup-token` value that
     typically lands in the .env file is NOT accepted by the oauth/usage
     endpoint (it answers 403), while the session token from the Keychain /
-    credentials file is. Cheapest authoritative source first, .env last."""
+    credentials file is. Cheapest authoritative source first, .env last.
+
+    2026-09-01: added the fleet setup-token file (store/.claude-oauth-token,
+    see src/web/agent-process.ts FLEET_OAUTH_TOKEN_PATH / claude-credentials-
+    guard.ts) as a fallback BEFORE the .env check. Root cause of needing this
+    fallback: the shared ~/.claude/.credentials.json this function checks
+    first can go empty/dead (rotating-token race, see claude-credentials-
+    guard.ts header) while the separate fleet token stays valid for actual
+    inference -- exactly the case that motivated per-agent config isolation.
+
+    CONFIRMED ROOT CAUSE (2026-09-01, kanban "Pontos usage-szazalek" card):
+    this is not a transient rate-limit and not account-specific. `claude
+    setup-token`'s OAuth authorization request hardcodes `inferenceOnly:
+    true` -- confirmed by extracting strings from the installed Claude Code
+    binary itself (bin/claude.exe): the client's own log/UI text reads
+    "env-var and setup-token sessions default to user:inference only", and
+    CLAUDE_AI_OAUTH_SCOPES (the scope set the interactive /login flow
+    requests) separately lists user:profile -- a scope setup-token never
+    asks for. /api/oauth/usage requires user:profile and 403s
+    ("permission_error", "OAuth token does not meet scope requirement
+    user:profile") for any token that lacks it, setup-token-minted or not.
+    Independently corroborated by 8+ open reports on the anthropics/
+    claude-code GitHub tracker (e.g. #22450, #21328, #23703) describing the
+    identical symptom back to the same OAuth authorization URL
+    (`scope=user%3Ainference`); one reporter confirms this is a deliberate
+    tightening (setup-token used to request broader scope in an earlier CLI
+    release), not an always-existing limitation.
+
+    A 429 (seen 2026-09-01, `x-should-retry: false`) can ALSO show up on
+    the same token/endpoint pair -- that is Anthropic's edge throttling
+    layered on top of repeated polling, a separate symptom of the same
+    restricted access pattern, not a competing explanation for the 403.
+
+    Practical consequence, unchanged: there is no supported way to mint a
+    long-lived, headless-suitable token that also carries user:profile --
+    the 1-year TTL and inferenceOnly appear to be bundled by Anthropic's own
+    authorization server, not something this fleet's token-handling code can
+    separate. This fallback is kept because the fleet token IS valid for its
+    real purpose (inference), just never for this specific endpoint; the
+    5-hour/weekly % figures stay in the "estimate" fallback (a raw local
+    token-count, not a true percentage -- the actual plan limit is not
+    knowable locally either) until a real interactive session token exists
+    in ~/.claude/.credentials.json again (which reintroduces the original
+    rotating-token fragility -- a real tradeoff, not a bug to chase further
+    here)."""
     cred_path = os.path.expanduser("~/.claude/.credentials.json")
     if os.path.exists(cred_path):
         try:
@@ -359,6 +411,16 @@ def _read_claude_token():
     keychain_token = _read_keychain_token()
     if keychain_token:
         return keychain_token, "keychain"
+
+    fleet_token_path = os.path.join(REPO_ROOT, "store", ".claude-oauth-token")
+    if os.path.exists(fleet_token_path):
+        try:
+            with open(fleet_token_path, "r", encoding="utf-8") as f:
+                token = f.read().strip()
+            if token:
+                return token, "fleet_token_file"
+        except Exception:
+            pass
 
     if os.path.exists(ENV_PATH):
         try:
@@ -383,6 +445,87 @@ def _claude_cli_version():
         return out.split()[0] if out else "unknown"
     except Exception:
         return "unknown"
+
+
+def _read_statusline_cache(max_age_minutes):
+    """Return (windows_dict, age_minutes) from a dedicated tracker session's
+    statusLine export (statusline-usage-export.py), or (None, None) if it
+    doesn't exist, is unparseable, or either required window is missing/
+    invalid/individually stale.
+
+    This exists because /api/oauth/usage 403s for any setup-token-scoped
+    fleet token (see docs/usage-percent-oauth-scope-root-cause-20260901.md)
+    -- there is no legitimate way to widen that token's scope. Claude Code's
+    own statusLine feature receives the SAME five_hour/seven_day utilization
+    numbers directly in the JSON it feeds a configured status-line script,
+    sourced from the session's own normal inference responses, not the
+    restricted endpoint -- so a session with statusLine wired up (a
+    DEDICATED, non-critical tracker session only; see
+    docs/statusline-usage-tracker-dev-spec-20260901.md for why not any
+    fleet-critical session) sidesteps the scope problem entirely, no network
+    call needed here at all.
+
+    Checked BEFORE the network fetch in collect_claude() -- if this is
+    fresh, skip the network round-trip (and its now-expected
+    403/429) entirely for this cycle.
+
+    PER-WINDOW freshness (Codex review round 3, 2026-09-01, confirmed by
+    BÉLA independently re-reading the code): an earlier version checked one
+    FILE-level collected_at_unix for the whole snapshot. That let a stale
+    window silently pass as fresh: statusline-usage-export.py merges
+    partial payloads (only one primary window validly parsed in a given
+    stdin invocation is normal, not an edge case), and a shared timestamp
+    meant writing a genuinely-new five_hour value alongside a carried-over,
+    actually-old seven_day value stamped BOTH as "just written". Each
+    window now carries its own collected_at_unix (written by
+    statusline-usage-export.py); this function checks each REQUIRED
+    window's own age independently -- a window individually older than
+    max_age_minutes fails the whole cache, exactly as if it were missing.
+    The returned age_minutes is the MAX (staler) of the two required
+    windows' ages -- the honest, conservative number to surface, not the
+    fresher one."""
+    if not os.path.exists(STATUSLINE_CACHE_PATH):
+        return None, None
+    try:
+        with open(STATUSLINE_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None, None
+
+    windows = data.get("windows")
+    if not isinstance(windows, dict) or not windows:
+        return None, None
+
+    now_ts = datetime.now(timezone.utc).timestamp()
+    ages = []
+    # A statusLine payload can legitimately carry only ONE of the two
+    # primary windows in a given invocation (the stdin JSON's rate_limits
+    # block fills in as the session's turns happen, not atomically) --
+    # trusting a partial/stale snapshot as "authoritative" risks silently
+    # under-reporting (e.g. showing a fine 5-hour number while the weekly
+    # window is simply absent or stale, not actually fine). Require BOTH
+    # five_hour AND seven_day to be present with a real numeric percentage
+    # AND individually fresh before this source is trusted at all;
+    # otherwise fall through to the network/cached/estimate chain same as
+    # if the cache didn't exist. Never synthesize a 0% for a missing/
+    # invalid window -- that reads as "no usage" instead of "unknown",
+    # which is worse than admitting we don't know.
+    for required_key in ("five_hour", "seven_day"):
+        w = windows.get(required_key)
+        if not isinstance(w, dict):
+            return None, None
+        pct = w.get("used_percent")
+        if not isinstance(pct, (int, float)) or isinstance(pct, bool) or not (0 <= pct <= 100):
+            return None, None
+        collected_at = w.get("collected_at_unix")
+        if not isinstance(collected_at, (int, float)):
+            return None, None
+        age_minutes = (now_ts - collected_at) / 60.0
+        if age_minutes < 0 or age_minutes > max_age_minutes:
+            return None, None
+        ages.append(age_minutes)
+
+    return windows, max(ages)
 
 
 def _collect_claude_authoritative():
@@ -469,7 +612,7 @@ def _read_cached_claude_authoritative(max_age_minutes, now_utc=None):
         return None, None
 
     claude = data.get("claude") or {}
-    if claude.get("source") not in ("authoritative", "authoritative_cached"):
+    if claude.get("source") not in ("authoritative", "authoritative_cached", "authoritative_statusline"):
         return None, None
     windows = claude.get("windows")
     if not windows:
@@ -551,6 +694,18 @@ def _collect_claude_estimate():
 
 def collect_claude():
     result = {"provider": "claude", "source": "estimate", "ok": True}
+
+    # Dedicated tracker session's statusLine export, if fresh, wins outright
+    # -- it is genuinely authoritative (sourced from the account's own real
+    # inference responses) and needs no network call, so it skips straight
+    # past the now-expected 403/429 from a setup-token-scoped fleet token.
+    sl_windows, sl_age = _read_statusline_cache(CONFIG["claude_statusline_cache_max_age_min"])
+    if sl_windows is not None:
+        result["source"] = "authoritative_statusline"
+        result["windows"] = sl_windows
+        result["statusline_age_min"] = round(sl_age, 1)
+        return result
+
     windows, err, err_kind = _collect_claude_authoritative()
     if windows is not None:
         result["source"] = "authoritative"
@@ -640,11 +795,15 @@ def render_summary(snapshot):
     lines.append(f"Claude (source: {claude.get('source')}):")
     if not claude.get("ok"):
         lines.append(f"  error: {claude.get('error')}")
-    elif claude.get("source") in ("authoritative", "authoritative_cached"):
+    elif claude.get("source") in ("authoritative", "authoritative_cached", "authoritative_statusline"):
         if claude.get("source") == "authoritative_cached":
             age = claude.get("cache_age_minutes")
             age_str = f"{age:.0f}" if isinstance(age, (int, float)) else "?"
             lines.append(f"  (from cache, {age_str} min ago -- live endpoint error: {claude.get('auth_error')})")
+        elif claude.get("source") == "authoritative_statusline":
+            age = claude.get("statusline_age_min")
+            age_str = f"{age:.1f}" if isinstance(age, (int, float)) else "?"
+            lines.append(f"  (from dedicated tracker session's statusLine export, {age_str} min ago)")
         windows = claude.get("windows", {})
         names = {
             "five_hour": "5-hour",

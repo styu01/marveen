@@ -17,7 +17,7 @@ import {
 import { withSessionSendLock } from './session-send-lock.js'
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
 import { detectPaneState } from '../pane-state.js'
-import { notifyChannel } from '../notify.js'
+import { escalateToOwner } from './owner-escalation.js'
 
 // =============================================================================
 // Interactive-tmux agent worker (jun.15 subscription migration).
@@ -576,14 +576,29 @@ function selfHealWorkerOnce(ctx: WorkerCtx): boolean {
   return true
 }
 
-/** Loud, rate-limited operator signal: the worker never became ready. */
-function alertWorkerStuck(ctx: WorkerCtx, paneTail: string): void {
+/** Loud, rate-limited operator signal: the worker never became ready.
+ *
+ * Kanban cf12a93a (2026-09-02): BÉLA first, Istvan only if unresolved. This
+ * still fires at most once per WORKER_STUCK_ALERT_COOLDOWN_MS (1h), same
+ * throttle as before -- and since that's well past escalateToOwner's default
+ * 5-minute stage-2 gap, the natural cadence is: first qualifying call sends
+ * the BÉLA notice, the NEXT one (an hour later, if still stuck) sends the
+ * direct owner alert. Note this worker has no natural "recovered" signal to
+ * hook a clearOwnerEscalation reset into (unlike the other sites this same
+ * card touched), so once Istvan has been notified once for a given stuck
+ * spell, later hourly re-checks stay silent rather than re-paging Istvan
+ * every hour indefinitely as the old direct-notifyChannel version did --
+ * BÉLA is expected to actually track/resolve it now that it's been relayed,
+ * rather than the operator getting hourly reminders of a known issue. */
+export function alertWorkerStuck(ctx: WorkerCtx, paneTail: string): void {
   logger.error({ paneTail, session: ctx.session }, 'agent-worker: worker never became ready (agent-gen / capability-summary / heartbeat / digest consumers will fail)')
   if (Date.now() - ctx.lastStuckAlert < WORKER_STUCK_ALERT_COOLDOWN_MS) return
   ctx.lastStuckAlert = Date.now()
-  void notifyChannel(
-    `⚠️ Marveen worker [${ctx.session}]: a hatter-worker session nem all keszen (beragadt dialogus vagy ismeretlen kepernyo). Onjavitas lefutott (Escape + restart), de a keszenlet nem allt helyre. Erintett: agens-generalas, capability-osszefoglalo, heartbeat, digest. Nezz ra: tmux attach -t ${ctx.session}`,
-  ).catch(() => { /* notifyChannel logs internally */ })
+  escalateToOwner({
+    key: `worker-stuck:${ctx.session}`,
+    belaText: `[worker-stuck] Marveen worker [${ctx.session}]: a hatter-worker session nem all keszen (beragadt dialogus vagy ismeretlen kepernyo). Onjavitas lefutott (Escape + restart), de a keszenlet nem allt helyre. Erintett: agens-generalas, capability-osszefoglalo, heartbeat, digest. Ha tudsz, nezz ra (tmux attach -t ${ctx.session}), kulonben Istvan direkt Telegram-ertesitest kap ha ez tovabb tart.`,
+    ownerText: `⚠️ Marveen worker [${ctx.session}]: a hatter-worker session nem all keszen (beragadt dialogus vagy ismeretlen kepernyo). Onjavitas lefutott (Escape + restart), de a keszenlet nem allt helyre. Erintett: agens-generalas, capability-osszefoglalo, heartbeat, digest. BÉLA mar ertesitve volt errol. Nezz ra: tmux attach -t ${ctx.session}`,
+  })
 }
 
 async function ensureWorkerReady(ctx: WorkerCtx): Promise<boolean> {

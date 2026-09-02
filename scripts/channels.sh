@@ -316,6 +316,65 @@ PYEOF
 _ensure_plugin_enabled "$INSTALL_DIR/.claude/settings.json"
 unset -f _ensure_plugin_enabled
 
+# Self-healing guard: strip a `statusLine` key out of the MAIN agent's own
+# settings.json before every launch. This is a fleet-critical, scheduler-
+# and router-monitored session -- pane-state.ts's busy-detection depends on
+# the `esc to interrupt` footer hint, which Claude Code's statusLine feature
+# suppresses for a brief window at the start of every turn (confirmed
+# regression, see docs/statusline-usage-tracker-dev-spec-20260901.md
+# section 4.1). statusLine is only safe on a fully dedicated, isolated
+# "usage-tracker" session that nothing else ever targets for prompt
+# delivery or busy/idle-gated decisions -- never on this one. This guard
+# makes that a technical guarantee instead of a convention someone could
+# forget: if `statusLine` ever ends up in this file (manual edit, a stray
+# copy-paste from the tracker session's config, a future merge), it gets
+# scrubbed before the session that would be put at risk ever starts.
+_ensure_no_statusline() {
+  local settings_file="$1"
+  [ -f "$settings_file" ] || return 0
+  python3 - "$settings_file" <<'PYEOF'
+import json, os, sys, tempfile
+
+path = sys.argv[1]
+
+try:
+    with open(path, "r") as f:
+        data = json.load(f)
+except (OSError, ValueError):
+    print("channels.sh: settings.json unreadable/invalid, statusline-guard skipped: %s" % path,
+          file=sys.stderr, flush=True)
+    sys.exit(0)
+
+if not isinstance(data, dict):
+    sys.exit(0)
+
+if "statusLine" not in data:
+    sys.exit(0)  # already absent -> no write, no needless churn
+
+removed = data.pop("statusLine")
+data.pop("refreshInterval", None)  # only meaningful alongside statusLine
+
+dir_name = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(dir=dir_name, prefix=".settings-", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+
+print("channels.sh: WARNING -- removed statusLine (%r) from %s before launch, this session must never carry it" % (removed, path),
+      file=sys.stderr, flush=True)
+PYEOF
+}
+_ensure_no_statusline "$INSTALL_DIR/.claude/settings.json"
+unset -f _ensure_no_statusline
+
 # Build the extra --channels args from CHANNEL_PLUGINS_EXTRA (space-separated
 # plugin IDs). Each becomes an additional `plugin:<id>` token appended to the
 # --channels list. `claude --channels` accepts a space-separated plugin list,

@@ -191,4 +191,13 @@ describe('classifyTelegramSendError', () => {
     expect(classifyTelegramSendError('Telegram API 403: Forbidden: bot was blocked by the user')).toBe('permanent')
     expect(classifyTelegramSendError('Telegram API 404: Not Found')).toBe('permanent')
   })
+
+  it('treats the connection-timeout message channel-provider.ts now throws (kanban cf12a93a, round 3) as transient', () => {
+    // Exact message format from telegramHttpPost's req.setTimeout handler
+    // (src/channel-provider.ts) -- no "Telegram API <status>" substring, so
+    // it correctly falls through to the no-HTTP-status/network-failure
+    // branch. A stalled connection should be retried soon, not treated as a
+    // permanent config problem.
+    expect(classifyTelegramSendError('Telegram request timed out after 10000ms')).toBe('transient')
+  })
 })

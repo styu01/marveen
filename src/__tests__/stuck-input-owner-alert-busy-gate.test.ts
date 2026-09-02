@@ -68,14 +68,21 @@ describe('wiring: the owner alert goes through the gate, recovery does not', () 
   const start = SRC.indexOf('async function checkLocalSession')
   const fnBody = SRC.slice(start, SRC.indexOf('\n}', start))
 
-  it('checkLocalSession exists and its alert is gated by shouldAlertParkedGiveUp', () => {
+  it('checkLocalSession exists and its escalation is gated by shouldAlertParkedGiveUp', () => {
     expect(start).toBeGreaterThanOrEqual(0)
     expect(fnBody).toMatch(/shouldAlertParkedGiveUp\(/)
-    // The sendAlert call must be INSIDE the gated branch: no sendAlert may
-    // appear in the body before the gate call.
+    // The escalateToOwner call must be INSIDE the gated branch: no
+    // escalateToOwner may appear in the body before the gate call. Kanban
+    // cf12a93a (2026-09-02): the direct sendAlert() call was replaced with
+    // escalateToOwner() -- BÉLA first, Istvan only if unresolved -- so this
+    // now anchors on escalateToOwner instead of sendAlert.
     const gateIdx = fnBody.indexOf('shouldAlertParkedGiveUp(')
-    const alertIdx = fnBody.indexOf('sendAlert(')
+    const alertIdx = fnBody.indexOf('escalateToOwner(')
     expect(alertIdx).toBeGreaterThan(gateIdx)
+  })
+
+  it('checkLocalSession no longer calls sendAlert directly (fully routed through escalateToOwner)', () => {
+    expect(fnBody).not.toMatch(/[^.]sendAlert\(/)
   })
 
   it('the pane state is read fresh at alert time (capturePane + detectPaneState)', () => {
@@ -83,13 +90,15 @@ describe('wiring: the owner alert goes through the gate, recovery does not', () 
     expect(fnBody).toMatch(/detectPaneState\(pane\)/)
   })
 
-  it('a spell that ends clears the one-alert-per-spell marker', () => {
-    // Spell end is the parkedSig === null branch; the marker delete must sit
-    // in it, or a session could alert only once across its whole lifetime.
+  it('a spell that ends clears the one-alert-per-spell marker AND the owner-escalation timers', () => {
+    // Spell end is the parkedSig === null branch; both the log-dedup marker
+    // and the two-stage escalation state must clear there, or a session
+    // could only ever escalate once across its whole lifetime.
     const spellEnd = fnBody.indexOf('watchState.delete(session)')
     expect(spellEnd).toBeGreaterThanOrEqual(0)
-    const after = fnBody.slice(spellEnd, spellEnd + 120)
+    const after = fnBody.slice(spellEnd, spellEnd + 200)
     expect(after).toMatch(/alertedSpells\.delete\(session\)/)
+    expect(after).toMatch(/clearOwnerEscalation\(/)
   })
 
   it('recovery attempts are NOT busy-gated (only the escalation is)', () => {

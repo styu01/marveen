@@ -877,5 +877,213 @@ class TestClaudeTokenSources(unittest.TestCase):
             self.assertEqual(uc._read_claude_token(), (None, None))
 
 
+class TestStatuslineCache(unittest.TestCase):
+    """_read_statusline_cache() -- the dedicated tracker session's statusLine
+    export (statusline-usage-export.py), read as a scope-restriction-free
+    alternative to the 403'ing /api/oauth/usage call. See
+    docs/statusline-usage-tracker-dev-spec-20260901.md."""
+
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        self._tmp.close()
+
+        def _cleanup_tmp():
+            # test_missing_file_returns_none_pair unlinks it itself to
+            # exercise the "no cache file at all" path -- tolerate that.
+            try:
+                os.unlink(self._tmp.name)
+            except FileNotFoundError:
+                pass
+
+        self.addCleanup(_cleanup_tmp)
+        self._patch = patch.object(uc, "STATUSLINE_CACHE_PATH", self._tmp.name)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+
+    def _write(self, payload):
+        with open(self._tmp.name, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+
+    @staticmethod
+    def _window(pct, resets_at=1234, age_seconds=60):
+        """Codex review round 3, 2026-09-01: each window carries its OWN
+        collected_at_unix now, not one shared file-level timestamp -- see
+        the docstring on _read_statusline_cache for why (a stale window
+        must not be able to ride to "fresh" under a sibling's timestamp)."""
+        now = datetime.now(timezone.utc).timestamp()
+        return {"used_percent": pct, "resets_at": resets_at, "collected_at_unix": now - age_seconds}
+
+    def test_missing_file_returns_none_pair(self):
+        os.unlink(self._tmp.name)
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_fresh_valid_cache_returned_with_age(self):
+        self._write({
+            "source": "statusline",
+            "windows": {
+                "five_hour": self._window(42, 1234, age_seconds=120),  # 2 min old
+                "seven_day": self._window(8, 5678, age_seconds=120),
+            },
+        })
+        windows, age = uc._read_statusline_cache(15)
+        self.assertEqual(windows["five_hour"]["used_percent"], 42)
+        self.assertEqual(windows["seven_day"]["used_percent"], 8)
+        self.assertAlmostEqual(age, 2.0, delta=0.1)
+
+    def test_age_is_the_staler_of_the_two_required_windows(self):
+        """The returned age must be the MAX (most conservative), not the
+        fresher window's age -- otherwise a genuinely stale window could
+        report as fresh via its fresher sibling."""
+        self._write({
+            "windows": {
+                "five_hour": self._window(42, 1234, age_seconds=60),    # 1 min old
+                "seven_day": self._window(8, 5678, age_seconds=600),    # 10 min old
+            },
+        })
+        windows, age = uc._read_statusline_cache(15)
+        self.assertIsNotNone(windows)
+        self.assertAlmostEqual(age, 10.0, delta=0.1)
+
+    def test_one_window_individually_stale_rejects_whole_cache(self):
+        """The core fix for the release-blocker: even though BOTH windows
+        are present and BOTH values are individually valid, one of them
+        being older than max_age_minutes must reject the whole cache --
+        not just quietly serve the stale one under a shared/fresher
+        timestamp."""
+        self._write({
+            "windows": {
+                "five_hour": self._window(42, 1234, age_seconds=60),        # 1 min old -- fresh
+                "seven_day": self._window(8, 5678, age_seconds=20 * 60),    # 20 min old -- stale
+            },
+        })
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_only_five_hour_present_rejected(self):
+        """Codex hardening review, 2026-09-01: a partial snapshot (only one
+        of the two primary windows) must not be trusted as authoritative --
+        the statusLine payload's rate_limits block fills in incrementally,
+        not atomically."""
+        self._write({"windows": {"five_hour": self._window(42, 1234)}})
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_only_seven_day_present_rejected(self):
+        self._write({"windows": {"seven_day": self._window(8, 5678)}})
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_out_of_range_percent_rejected(self):
+        self._write({
+            "windows": {
+                "five_hour": self._window(150, 1234),
+                "seven_day": self._window(8, 5678),
+            },
+        })
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_bool_percent_rejected(self):
+        """bool is a subclass of int in Python -- must not sneak past an
+        isinstance(x, (int, float)) check as a fake 100%/0%."""
+        self._write({
+            "windows": {
+                "five_hour": self._window(True, 1234),
+                "seven_day": self._window(8, 5678),
+            },
+        })
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_non_numeric_percent_rejected(self):
+        self._write({
+            "windows": {
+                "five_hour": self._window("forty-two", 1234),
+                "seven_day": self._window(8, 5678),
+            },
+        })
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_stale_cache_rejected(self):
+        self._write({
+            "windows": {
+                "five_hour": self._window(42, 1234, age_seconds=20 * 60),  # 20 min old
+                "seven_day": self._window(8, 5678, age_seconds=20 * 60),
+            },
+        })
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_future_timestamp_rejected(self):
+        """Clock skew / corrupt data producing a negative age must not be
+        treated as 'infinitely fresh'."""
+        self._write({
+            "windows": {
+                "five_hour": self._window(42, 1234, age_seconds=-3600),
+                "seven_day": self._window(8, 5678, age_seconds=60),
+            },
+        })
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_missing_per_window_timestamp_rejected(self):
+        """A window dict without its own collected_at_unix (e.g. an old-
+        schema file from before this fix, or a malformed write) must not be
+        trusted -- there's no shared file-level timestamp to fall back on
+        anymore, and treating "no timestamp" as "infinitely fresh" would be
+        exactly the bug this schema change fixes."""
+        self._write({
+            "windows": {
+                "five_hour": {"used_percent": 42, "resets_at": 1234},  # no collected_at_unix
+                "seven_day": self._window(8, 5678),
+            },
+        })
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_unparseable_json_returns_none_pair(self):
+        with open(self._tmp.name, "w", encoding="utf-8") as f:
+            f.write("not json")
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_missing_windows_key_returns_none_pair(self):
+        self._write({"source": "statusline"})
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_empty_windows_dict_returns_none_pair(self):
+        self._write({"windows": {}})
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+
+class TestCollectClaudeStatuslinePriority(unittest.TestCase):
+    """collect_claude() must prefer a fresh statusline cache over the
+    network fetch entirely -- no network call at all when it's fresh, so a
+    dedicated tracker session's export never pays for (or gets masked by) a
+    setup-token 403/429 on the /api/oauth/usage endpoint."""
+
+    def test_fresh_statusline_cache_skips_network_fetch_entirely(self):
+        fake_windows = {"five_hour": {"used_percent": 7, "resets_at": 1234}}
+        with patch.object(uc, "_read_statusline_cache", return_value=(fake_windows, 1.2)), \
+             patch.object(uc, "_collect_claude_authoritative") as mock_network:
+            result = uc.collect_claude()
+        mock_network.assert_not_called()
+        self.assertEqual(result["source"], "authoritative_statusline")
+        self.assertEqual(result["windows"], fake_windows)
+        self.assertEqual(result["statusline_age_min"], 1.2)
+
+    def test_stale_or_absent_statusline_cache_falls_through_to_network(self):
+        fake_windows = {"five_hour": {"used_percent": 33, "resets_at": 5678}}
+        with patch.object(uc, "_read_statusline_cache", return_value=(None, None)), \
+             patch.object(uc, "_collect_claude_authoritative", return_value=(fake_windows, None, None)) as mock_network:
+            result = uc.collect_claude()
+        mock_network.assert_called_once()
+        self.assertEqual(result["source"], "authoritative")
+        self.assertEqual(result["windows"], fake_windows)
+
+    def test_iter_windows_includes_authoritative_statusline_source(self):
+        snapshot = {
+            "claude": {
+                "ok": True,
+                "source": "authoritative_statusline",
+                "windows": {"five_hour": {"used_percent": 10, "resets_at": _future_ts(hours=2)}},
+            },
+            "codex": {"ok": False},
+        }
+        scope_keys = [sk for sk, _, _ in uc._iter_pace_windows(snapshot)]
+        self.assertIn("claude_five_hour", scope_keys)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

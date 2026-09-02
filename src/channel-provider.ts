@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { logger } from './logger.js'
 import { formatForTelegram, splitMessage } from './format.js'
 import { markIfTestRun } from './test-run-marker.js'
+import { TOOL_TIMEOUTS } from './tool-timeouts.js'
 
 export type ChannelProviderType = 'telegram' | 'slack' | 'discord' | 'googlechat' | 'teams'
 
@@ -44,6 +45,21 @@ function telegramHttpPost(token: string, method: string, body: string, contentTy
         }
       }
     )
+    // Kanban cf12a93a (2026-09-02, Codex review round 3, confirmed against
+    // this exact code by BÉLA): there was NO timeout here at all -- a stalled
+    // TCP connection (accepted but never responding) leaves this promise
+    // pending forever, since req.on('error') only fires on a genuine
+    // connection-level error, not a silent hang. This became load-bearing
+    // once owner-escalation.ts's stage-2 retry loop started AWAITing a send
+    // through this path directly: an unbounded hang here would leave that
+    // escalation's state (and its own retry timer) stuck forever with
+    // nothing to ever notice. TOOL_TIMEOUTS['telegram'] (10s) matches the
+    // SAME deadline src/web/telegram.ts's sendTelegramMessage already uses
+    // (via AbortSignal.timeout) -- this was the one inconsistent, timeout-
+    // less Telegram send path in the codebase, not a deliberate design.
+    req.setTimeout(TOOL_TIMEOUTS['telegram'], () => {
+      req.destroy(new Error(`Telegram request timed out after ${TOOL_TIMEOUTS['telegram']}ms`))
+    })
     req.on('error', reject)
     req.write(body)
     req.end()

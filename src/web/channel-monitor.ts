@@ -45,6 +45,7 @@ import {
 import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { isKnownRecentInjection, isKnownRecentScheduledTaskInjection } from './sent-text-registry.js'
 import { notifyChannel } from '../notify.js'
+import { escalateToOwner, clearOwnerEscalation } from './owner-escalation.js'
 import { getProvider, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { attemptChannelMcpReconnect } from './channel-mcp-reconnect.js'
 import { readLastIngestionTimestamp, TRANSCRIPT_DIR } from './inbound-probe.js'
@@ -1294,14 +1295,48 @@ export function shouldAlertStuckSubAgent(
   return nowMs - lastAlertedAt >= minIntervalMs
 }
 
+// Stable escalation identity for this alert, namespaced from stuck-input-
+// watcher.ts's own ("stuck-input:") so the two independent overdue-guard
+// mechanisms (this one and stuck-input-watcher.ts's) never share a stage
+// timer even if they somehow overlap on the same session.
+function stuckSubAgentEscalationKey(session: string): string {
+  return `stuck-subagent-overdue:${session}`
+}
+
+// Two DISTINCT keys, not one shared "channel-down" key: the busy-defer alert
+// and the give-up-after-max-restarts alert are different severities that can
+// fire in sequence for the same down-spell (busy-defer first, then give-up
+// once the deferral cap is also exhausted). Sharing one key would let the
+// more severe give-up alert get silently swallowed by escalateToOwner's
+// per-key idempotency if the earlier, less severe alert had already
+// completed its own stage-1/stage-2 cycle on that key.
+function channelDownBusyEscalationKey(session: string): string {
+  return `channel-down-busy:${session}`
+}
+function channelDownMaxRestartsEscalationKey(session: string): string {
+  return `channel-down-max-restarts:${session}`
+}
+
 function maybeAlertStuckSubAgent(session: string, agentName: string | null, state: StuckInputState): void {
   const last = subAgentOverdueAlertedAt.get(session) ?? 0
   const now = Date.now()
   if (!shouldAlertStuckSubAgent(state, MAIN_STUCK_THRESHOLDS.maxAttempts, last, now, SUBAGENT_OVERDUE_ALERT_MIN_INTERVAL_MS)) return
   subAgentOverdueAlertedAt.set(session, now)
   const label = agentName ?? session
-  logger.error({ session, agentName, attempts: state.attempts }, 'Sub-agent stuck input survived soft recovery -- overdue-guard alert (no auto-restart)')
-  sendAlert(`⚠️ A(z) ${label} session bemenete beragadt, ${state.attempts} automatikus próbálkozás sem szabadította ki (kb. 4-4.5 perce). Kézi ellenőrzés javasolt: \`tmux attach -t ${session}\`, szükség esetén \`tmux respawn-pane -k -t ${session}\`.`)
+  logger.error({ session, agentName, attempts: state.attempts }, 'Sub-agent stuck input survived soft recovery -- overdue-guard escalation (no auto-restart)')
+  // Kanban cf12a93a (2026-09-02): BÉLA first, Istvan only if unresolved.
+  // This check re-runs every SUBAGENT_OVERDUE_ALERT_MIN_INTERVAL_MS (15 min)
+  // while the wedge persists; escalateToOwner's own per-key state makes that
+  // safe -- the BÉLA notice fires once, the direct owner alert fires once
+  // (if BÉLA hasn't resolved it by then), and further 15-min re-checks on an
+  // already-escalated spell are no-ops, matching schedule-runner's own
+  // one-shot-per-incident owner alert rather than repeat-paging Istvan every
+  // 15 minutes for a problem BÉLA already knows about.
+  escalateToOwner({
+    key: stuckSubAgentEscalationKey(session),
+    belaText: `[stuck-input] A(z) ${label} session (${session}) bemenete beragadt, ${state.attempts} automatikus próbálkozás sem szabadította ki. Ha tudsz, nezd meg (tmux attach -t ${session}), kulonben Istvan direkt Telegram-ertesitest kap ha ez tovabb tart.`,
+    ownerText: `⚠️ A(z) ${label} session bemenete beragadt, ${state.attempts} automatikus próbálkozás sem szabadította ki. BÉLA mar ertesitve volt errol, de nem oldodott meg. Kézi ellenőrzés javasolt: \`tmux attach -t ${session}\`, szükség esetén \`tmux respawn-pane -k -t ${session}\`.`,
+  })
 }
 
 // --- Keep-alive staleness watchdog (deafness safety net, decision #3) ---
@@ -1467,6 +1502,34 @@ function checkMainKeepaliveStaleness(): void {
 
 export function sendAlert(text: string): void {
   notifyChannel(text).catch(() => {})
+}
+
+// Shared helper for the per-target (main + sub-agent) monitoring loops
+// below. BÉLA's own session (t.isMarveen) still goes straight to sendAlert
+// -- paging BÉLA about BÉLA's own session breaking doesn't make sense, BÉLA
+// IS the thing that would need to react, and an inter-agent notice queued to
+// a wedged main session could strand behind the very problem it reports
+// (same reasoning as agent-process.ts's MAIN_CHANNELS_SESSION escalation).
+// Everyone else routes through the two-stage escalateToOwner gate (kanban
+// cf12a93a, Istvan's standing rule restated 2026-09-02: system alerts go to
+// BÉLA first, Istvan only if unresolved). `escalationType` namespaces the
+// key so unrelated alert kinds on the same session never share a stage
+// timer. Derives both stage texts from one base message rather than
+// requiring every call site to author two near-duplicate strings.
+function alertOwnerOrBela(
+  t: { isMarveen: boolean; session: string },
+  escalationType: string,
+  ownerText: string,
+): void {
+  if (t.isMarveen) {
+    sendAlert(ownerText)
+    return
+  }
+  escalateToOwner({
+    key: `${escalationType}:${t.session}`,
+    belaText: `[${escalationType}] ${ownerText}\n\nHa tudsz, oldd fel, kulonben Istvan direkt Telegram-ertesitest kap ha ez tovabb tart.`,
+    ownerText: `${ownerText}\n\n(BÉLA mar ertesitve volt errol, de nem oldodott meg.)`,
+  })
 }
 
 async function handleMarveenDown(): Promise<void> {
@@ -1678,7 +1741,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       if (decision.alert) {
         const label = t.isMarveen ? BOT_NAME : (t.agentName ?? t.session)
         logger.error({ session: t.session, agent: label }, 'Agent wedged on thinking-block API error -- manual reset needed')
-        sendAlert(`🚨 A(z) ${label} agens elakadt egy thinking-block API hibaban (a session-history korrupt, minden uj prompt ugyanazt a 400-at adja). Kezi reset kell: allitsd le es inditsd ujra, friss session indul. Reszletek: tmux attach -t ${t.session}`)
+        alertOwnerOrBela(t, 'thinking-block-error', `🚨 A(z) ${label} agens elakadt egy thinking-block API hibaban (a session-history korrupt, minden uj prompt ugyanazt a 400-at adja). Kezi reset kell: allitsd le es inditsd ujra, friss session indul. Reszletek: tmux attach -t ${t.session}`)
       }
     }
 
@@ -1718,14 +1781,14 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         const label = t.isMarveen ? BOT_NAME : (t.agentName ?? t.session)
         if (firstRunGate === 'login') {
           logger.warn({ session: t.session, agent: label }, 'Session parked on the Claude Code login picker -- operator login needed, alerting (no keystrokes sent)')
-          sendAlert(`🔑 A(z) ${label} agentnek Claude-belépés kell (első indítás, "Select login method" képernyő). Lépj be: tmux attach -t ${t.session}, majd válaszd ki a belépési módot. Addig az ütemezett feladatai és üzenetei várakoznak, belépés után maguktól kézbesítődnek.`)
+          alertOwnerOrBela(t, 'login-needed', `🔑 A(z) ${label} agentnek Claude-belépés kell (első indítás, "Select login method" képernyő). Lépj be: tmux attach -t ${t.session}, majd válaszd ki a belépési módot. Addig az ütemezett feladatai és üzenetei várakoznak, belépés után maguktól kézbesítődnek.`)
         } else if (firstRunGate) {
           logger.warn({ session: t.session, agent: label, gate: firstRunGate }, 'Session parked on a Claude Code first-run dialog -- answering the dialog chain')
           const res = await answerFirstRunGates(t.session)
           if (res === 'login') {
-            sendAlert(`🔑 A(z) ${label} agent első-indítási dialogjait továbbléptettem, de Claude-belépés kell ("Select login method"). Lépj be: tmux attach -t ${t.session}. Utána minden várakozó feladat magától kézbesítődik.`)
+            alertOwnerOrBela(t, 'login-needed', `🔑 A(z) ${label} agent első-indítási dialogjait továbbléptettem, de Claude-belépés kell ("Select login method"). Lépj be: tmux attach -t ${t.session}. Utána minden várakozó feladat magától kézbesítődik.`)
           } else {
-            sendAlert(`🧭 A(z) ${label} session a Claude Code első-indítási képernyőjén parkolt (${firstRunGate}); automatikusan továbbléptettem. A várakozó ütemezett feladatok a következő körben kézbesítődnek.`)
+            alertOwnerOrBela(t, 'first-run-advanced', `🧭 A(z) ${label} session a Claude Code első-indítási képernyőjén parkolt (${firstRunGate}); automatikusan továbbléptettem. A várakozó ütemezett feladatok a következő körben kézbesítődnek.`)
           }
         } else {
           // FABLEFALL1: the model usage-credit consent dialog is indistinguishable
@@ -1740,7 +1803,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           if (paneNow != null && detectsModelConsentDialog(paneNow)) {
             logger.warn({ session: t.session, agent: label }, 'Blocking "menu" is the model usage-credit consent dialog -- answering it safely instead of Escape')
             await dismissModelConsentDialogIfPresent(t.session)
-            sendAlert(`🎛️ A(z) ${label} session a modell-hozzájárulás dialóguson parkolt; az 1-es opcióval (a beállított modell megtartása) továbbléptettem. Modellváltás NEM történt.`)
+            alertOwnerOrBela(t, 'model-consent-dialog', `🎛️ A(z) ${label} session a modell-hozzájárulás dialóguson parkolt; az 1-es opcióval (a beállított modell megtartása) továbbléptettem. Modellváltás NEM történt.`)
           } else {
             logger.warn({ session: t.session, agent: label }, 'Session parked in a blocking interactive menu -- sending Escape to recover')
             try {
@@ -1748,7 +1811,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
             } catch (err) {
               logger.warn({ err, session: t.session }, 'Menu-recovery Escape failed')
             }
-            sendAlert(`⌨️ A(z) ${label} session beragadt egy interaktiv menube (pl. /mcp) es nem dolgozott fel uzeneteket. Kikuldtem egy Escape-et, visszateritettem a prompthoz. Ha ismetlodik: tmux attach -t ${t.session}`)
+            alertOwnerOrBela(t, 'blocking-menu-escape', `⌨️ A(z) ${label} session beragadt egy interaktiv menube (pl. /mcp) es nem dolgozott fel uzeneteket. Kikuldtem egy Escape-et, visszateritettem a prompthoz. Ha ismetlodik: tmux attach -t ${t.session}`)
           }
         }
       }
@@ -1777,6 +1840,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       if (next.parkedSig === null) {
         agentStuckInput.delete(t.session)
         subAgentOverdueAlertedAt.delete(t.session) // spell ended -> next wedge starts a fresh alert window
+        clearOwnerEscalation(stuckSubAgentEscalationKey(t.session))
       } else {
         agentStuckInput.set(t.session, next)
         maybeAlertStuckSubAgent(t.session, t.agentName ?? null, next)
@@ -1835,6 +1899,8 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           agentRestartFailures.delete(t.agentName!)
           clearPersistedAgentFailures(t.agentName!)
           agentBusyDeferAlerted.delete(t.session)
+          clearOwnerEscalation(channelDownBusyEscalationKey(t.session))
+          clearOwnerEscalation(channelDownMaxRestartsEscalationKey(t.session))
           // Retire any stale absent verdict too, so a future down-spell starts
           // with the full restart budget rather than the absent-capped one.
           clearPluginAbsent(t.session)
@@ -1897,8 +1963,12 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           // working. Killing it would destroy live work; deferring further would
           // leave it deaf. Ask the operator once, then keep deferring.
           if (!agentBusyDeferAlerted.has(t.session)) {
-            logger.error({ agent: t.agentName, provider: t.provider, msDown }, 'Agent channel plugin down past busy-defer cap -- agent still working, alerting operator instead of killing it')
-            sendAlert(`⚠️ A(z) ${t.agentName} agens ${t.provider} csatornaja ${Math.round(msDown / 60000)} perce halott, de az agens KOZBEN DOLGOZIK. Nem inditom ujra (a restart FRISS session -- elveszne a folyamatban levo munkaja). Dontsd el: varjuk meg amig vegez (akkor magatol ujraindul), vagy kezzel allitsd meg. Session: ${t.session}.`)
+            logger.error({ agent: t.agentName, provider: t.provider, msDown }, 'Agent channel plugin down past busy-defer cap -- agent still working, escalating instead of killing it')
+            escalateToOwner({
+              key: channelDownBusyEscalationKey(t.session),
+              belaText: `[channel-down-busy] A(z) ${t.agentName} agens ${t.provider} csatornaja ${Math.round(msDown / 60000)} perce halott, de az agens KOZBEN DOLGOZIK -- nem inditom ujra (elveszne a folyamatban levo munkaja). Ha tudsz, dontsd el varjunk-e vagy allitsd meg kezzel, kulonben Istvan direkt Telegram-ertesitest kap ha ez tovabb tart.`,
+              ownerText: `⚠️ A(z) ${t.agentName} agens ${t.provider} csatornaja ${Math.round(msDown / 60000)} perce halott, de az agens KOZBEN DOLGOZIK. Nem inditom ujra (a restart FRISS session -- elveszne a folyamatban levo munkaja). BÉLA mar ertesitve volt errol. Dontsd el: varjuk meg amig vegez (akkor magatol ujraindul), vagy kezzel allitsd meg. Session: ${t.session}.`,
+            })
             agentBusyDeferAlerted.add(t.session)
           }
           continue
@@ -1918,10 +1988,16 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           // loop and hand it to a human. Tick the counter past the cap so this
           // fires exactly once; a later healthy sweep resets it (re-arming the
           // alert for a future down-spell).
-          logger.error({ agent: t.agentName, provider: t.provider, failures, absentConfirmed }, 'Agent channel plugin down after max restart attempts -- giving up, alerting operator')
-          sendAlert(absentConfirmed
-            ? `⛔ A(z) ${t.agentName} agens ${t.provider} plugin-je BE SEM TOLTODOTT (absent a /mcp listabol), a fresh-restart ezt nem javitja -- tovabb nem probalom (minden restart elveszi a session kontextusat). Kezi TISZTA ujrainditas kell (uresen, mas agens indulasaval nem atlapolva): ${t.session}.`
-            : `⛔ A(z) ${t.agentName} agens ${t.provider} csatornaja ${AGENT_MAX_RESTART_ATTEMPTS} automatikus ujrainditas utan sem allt helyre. Tovabb nem indinitom ujra (minden restart elveszi a session kontextusat). Kezi beavatkozas kell: nezd meg a ${t.session} session-t es a ${SERVICE_ID} csatorna-plugint.`)
+          logger.error({ agent: t.agentName, provider: t.provider, failures, absentConfirmed }, 'Agent channel plugin down after max restart attempts -- giving up, escalating')
+          {
+            const ownerText = absentConfirmed
+              ? `⛔ A(z) ${t.agentName} agens ${t.provider} plugin-je BE SEM TOLTODOTT (absent a /mcp listabol), a fresh-restart ezt nem javitja -- tovabb nem probalom (minden restart elveszi a session kontextusat). BÉLA mar ertesitve volt errol. Kezi TISZTA ujrainditas kell (uresen, mas agens indulasaval nem atlapolva): ${t.session}.`
+              : `⛔ A(z) ${t.agentName} agens ${t.provider} csatornaja ${AGENT_MAX_RESTART_ATTEMPTS} automatikus ujrainditas utan sem allt helyre. Tovabb nem indinitom ujra (minden restart elveszi a session kontextusat). BÉLA mar ertesitve volt errol. Kezi beavatkozas kell: nezd meg a ${t.session} session-t es a ${SERVICE_ID} csatorna-plugint.`
+            const belaText = absentConfirmed
+              ? `[channel-down-max-restarts] A(z) ${t.agentName} agens ${t.provider} plugin-je BE SEM TOLTODOTT (absent a /mcp listabol), a fresh-restart ezt nem javitja -- tovabb nem probalom. Ha tudsz, nezd meg (${t.session}), kulonben Istvan direkt Telegram-ertesitest kap ha ez tovabb tart.`
+              : `[channel-down-max-restarts] A(z) ${t.agentName} agens ${t.provider} csatornaja ${AGENT_MAX_RESTART_ATTEMPTS} automatikus ujrainditas utan sem allt helyre. Ha tudsz, nezd meg (${t.session}), kulonben Istvan direkt Telegram-ertesitest kap ha ez tovabb tart.`
+            escalateToOwner({ key: channelDownMaxRestartsEscalationKey(t.session), belaText, ownerText })
+          }
           agentRestartFailures.set(t.agentName!, failures + 1)
           savePersistedAgentFailures(t.agentName!, failures + 1)
           agentDownSince.delete(t.session)

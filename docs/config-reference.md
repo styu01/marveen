@@ -305,6 +305,8 @@ Linuxon a `~/.claude/.credentials.json` egy rövid életű, magától rotálód�
 
 A megoldás: egy 1 éves, nem rotálódó setup-token (`claude setup-token`) a `store/.claude-oauth-token` fájlban, amit az agent-indító `CLAUDE_CODE_OAUTH_TOKEN`-ként exportál minden lokális agentnek. Ezzel a Claude Code-nak nincs szüksége a rotálódó `credentials.json`-ra. A `CLAUDE_CREDENTIALS_GUARD=1` flag bekapcsolja, hogy az indító a rotálódó `credentials.json`-t félretegye (`.credentials.json.bak`), így megszűnik a verseny.
 
+**Tudatos tradeoff, nem hiányosság**: a setup-token OAuth-hatóköre Anthropic oldalán szándékosan csak `user:inference`-re szűkített (a hosszú, 1 éves élettartammal egy csomagban jár, nincs mód a kettőt szétválasztani) -- ez a token tehát tényleges inferenciára tökéletes, de a fiók-szintű pontos usage-százalékot adó `/api/oauth/usage` végpont `user:profile` hatókört kér, amit a setup-token sosem kap meg (403 `permission_error`, nem hiba a mi oldalunkon). Részletek: `scripts/usage-collect.py` `_read_claude_token()` docstringje.
+
 - **Alapértelmezés: KIKAPCSOLVA.** A flag nélkül semmi nem történik (a jelenlegi viselkedés bájtra változatlan). Egy pilot-hoston kapcsold be a `.env`-ben (`CLAUDE_CREDENTIALS_GUARD=1`), ne mindenhol egyszerre.
 - **Csak Linux**, macOS-en no-op (ott nincs is credentials.json).
 - **Guardolt**: a rename CSAK akkor fut, ha van érvényes setup-token (formátum-ellenőrzés + egyszeri éles teszthívás, token-értékhez kötött cache-sel). Érvénytelen/hiányzó token esetén a credentials.json érintetlen marad, hogy egyetlen agent se essen ki.
