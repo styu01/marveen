@@ -584,3 +584,53 @@ of "verified absence of a signal, not a guess"):** the payload gives no
 way to tell "this account will never get `rate_limits`" apart from "it
 just hasn't happened yet in this session." Same resolution: documented,
 not guessed at.
+
+### 8.7 Accepted tradeoff 1 became real in production (2026-09-02) -- per-window freshness ceiling (BUILT)
+
+Section 8.6's accepted tradeoff 1 said explicitly: "if this proves to be a
+real practical problem after deployment... the fix would be widening
+`claude_statusline_cache_max_age_min` empirically." That happened within a
+day of going live: BÉLA, working a routine `usage-monitor` heartbeat
+(2026-09-02, ~10:34 CEST), found `usage-collect.py` reporting `source:
+estimate` even though the underlying tracker session was healthy and its
+`store/usage-statusline-latest.json` held genuinely current data --
+`five_hour` was 4.9 minutes old, but `seven_day` hadn't ticked in 34.8
+minutes (its rounded percentage simply hadn't changed), tripping the
+single 15-minute `claude_statusline_cache_max_age_min` ceiling for the
+WHOLE cache. Confirmed manually against the raw file before concluding
+anything -- this was a false stale reading, not a dead tracker.
+
+**Fix (István approved, "ezt most javitsd ki"):** `_read_statusline_cache()`
+now takes an optional `max_age_overrides: {window_key: minutes}` dict, so
+individual windows can carry a wider ceiling than the 15-minute default.
+`CONFIG["claude_statusline_cache_max_age_min_by_window"]` sets `seven_day`
+to 8 hours (`8 * 60`), mirroring the same "can stick for 6-8+ hours"
+behavior already documented for the raw `/api/oauth/usage` endpoint's
+`seven_day.utilization` in the `claude-usage-check` skill -- the weekly
+window is inherently coarse and rolling, this is normal, not a fault.
+`five_hour` keeps the original 15-minute default unchanged (it updates
+often enough that a real outage should still be caught quickly). The
+override is additive and per-window only: a stale `five_hour` still
+rejects the whole cache regardless of any `seven_day` override.
+
+Five new tests in `usage-collect.test.py` (override lets a stale-by-value
+seven_day through; override doesn't relax five_hour's own ceiling; a
+seven_day window older than ITS OWN override ceiling still rejects;
+calling with no override argument preserves the exact prior default
+behavior; the production CONFIG constant itself is pinned at 8*60 so an
+accidental edit doesn't go unnoticed). While verifying, also found and
+fixed an unrelated, pre-existing test-isolation gap in
+`TestCollectClaudeCacheFallback`: that class never patched
+`STATUSLINE_CACHE_PATH`, so once the live tracker session started writing
+genuinely fresh real data to the production file, those five tests began
+short-circuiting into `authoritative_statusline` before ever reaching the
+mocked 429/403/no-token network paths they exist to test -- reproduced as
+pre-existing on a clean `git stash` before this session's changes, not
+caused by the override work. Fixed by pointing that class's
+`STATUSLINE_CACHE_PATH` at a path that never exists in `setUp`. Full
+suite after both fixes: 105 tests in `usage-collect.test.py`, all green;
+26 in `statusline-usage-export.test.py` (untouched by this round),
+unaffected. Verified live, not just in isolated tests: a manual
+`python3 scripts/usage-collect.py` run immediately after the fix reported
+`source: authoritative_statusline` with real percentages (91% five_hour,
+21% seven_day) instead of the false `estimate` fallback.

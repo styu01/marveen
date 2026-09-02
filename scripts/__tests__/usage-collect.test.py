@@ -336,6 +336,26 @@ class TestCollectClaudeCacheFallback(unittest.TestCase):
     estimate; a stale/absent cache, a 403, or no token must still fall
     back to the estimate."""
 
+    def setUp(self):
+        # Isolation fix (2026-09-02, BÉLA, found while verifying the
+        # seven_day override change): this class never patched
+        # STATUSLINE_CACHE_PATH, so collect_claude()'s statusline check --
+        # which runs BEFORE the network path these tests are exercising --
+        # was reading the REAL store/usage-statusline-latest.json. That was
+        # harmless while the live tracker session didn't exist yet, but
+        # once it started actually running (2026-09-01/02) the real file
+        # started holding genuinely fresh, valid data, which made these
+        # tests short-circuit into authoritative_statusline before ever
+        # reaching the mocked 429/403/no-token network paths they're
+        # supposed to test -- a real, silent test-isolation gap, not
+        # something caused by today's override change (reproduced on a
+        # clean git stash of this class too). Point it at a path that
+        # never exists so this class stays hermetic regardless of what the
+        # live tracker is doing on this host.
+        self._statusline_patch = patch.object(uc, "STATUSLINE_CACHE_PATH", "/nonexistent/statusline-cache-for-tests.json")
+        self._statusline_patch.start()
+        self.addCleanup(self._statusline_patch.stop)
+
     def _write_latest(self, path, source, windows, generated_at):
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"generated_at": generated_at, "claude": {"source": source, "windows": windows}}, f)
@@ -957,6 +977,75 @@ class TestStatuslineCache(unittest.TestCase):
             },
         })
         self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_seven_day_override_lets_slow_moving_window_through(self):
+        """2026-09-02 false-stale finding (live usage-monitor heartbeat,
+        BÉLA): seven_day's collected_at_unix only advances when its VALUE
+        changes (statusline-usage-export.py's documented tradeoff), and the
+        weekly percentage can go well over an hour without moving even on a
+        perfectly healthy tracker. A per-window override must let a stale-
+        LOOKING but otherwise valid seven_day window through without
+        touching the five_hour default."""
+        self._write({
+            "windows": {
+                "five_hour": self._window(42, 1234, age_seconds=60),          # 1 min old
+                "seven_day": self._window(8, 5678, age_seconds=34 * 60),      # 34 min old
+            },
+        })
+        windows, age = uc._read_statusline_cache(15, {"seven_day": 8 * 60})
+        self.assertIsNotNone(windows)
+        self.assertEqual(windows["seven_day"]["used_percent"], 8)
+        self.assertAlmostEqual(age, 34.0, delta=0.2)
+
+    def test_seven_day_override_does_not_relax_five_hour_ceiling(self):
+        """The override is per-window, not global -- a stale five_hour
+        window must still reject the whole cache even when a seven_day
+        override is configured."""
+        self._write({
+            "windows": {
+                "five_hour": self._window(42, 1234, age_seconds=20 * 60),     # 20 min old -- stale
+                "seven_day": self._window(8, 5678, age_seconds=34 * 60),      # 34 min old, but overridden
+            },
+        })
+        self.assertEqual(
+            uc._read_statusline_cache(15, {"seven_day": 8 * 60}),
+            (None, None),
+        )
+
+    def test_seven_day_still_stale_beyond_its_own_override_ceiling(self):
+        """The override raises the ceiling, it doesn't remove it -- a
+        seven_day window older than ITS OWN override must still reject."""
+        self._write({
+            "windows": {
+                "five_hour": self._window(42, 1234, age_seconds=60),
+                "seven_day": self._window(8, 5678, age_seconds=9 * 60 * 60),  # 9h old > 8h override
+            },
+        })
+        self.assertEqual(
+            uc._read_statusline_cache(15, {"seven_day": 8 * 60}),
+            (None, None),
+        )
+
+    def test_no_override_argument_preserves_prior_default_behavior(self):
+        """Backward-compat: every pre-existing call site passes only the
+        first argument -- max_age_overrides must default to None and behave
+        exactly as before."""
+        self._write({
+            "windows": {
+                "five_hour": self._window(42, 1234, age_seconds=60),
+                "seven_day": self._window(8, 5678, age_seconds=20 * 60),
+            },
+        })
+        self.assertEqual(uc._read_statusline_cache(15), (None, None))
+
+    def test_configured_seven_day_override_is_eight_hours(self):
+        """Pins the actual production CONFIG value (not just the function's
+        generic override mechanism) -- catches an accidental edit of the
+        constant itself going unnoticed."""
+        self.assertEqual(
+            uc.CONFIG["claude_statusline_cache_max_age_min_by_window"]["seven_day"],
+            8 * 60,
+        )
 
     def test_only_five_hour_present_rejected(self):
         """Codex hardening review, 2026-09-01: a partial snapshot (only one

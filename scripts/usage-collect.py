@@ -70,7 +70,29 @@ CONFIG = {
                                                  # as authoritative if fresher than this -- generous
                                                  # enough for a session with no refreshInterval set
                                                  # (updates are otherwise event-driven only) while
-                                                 # still catching a tracker session that died
+                                                 # still catching a tracker session that died.
+                                                 # This is the DEFAULT; see
+                                                 # claude_statusline_cache_max_age_min_by_window
+                                                 # below for windows that need a wider one.
+    "claude_statusline_cache_max_age_min_by_window": {
+        # seven_day found false-stale in production 2026-09-02 (BÉLA, live
+        # usage-monitor heartbeat, kanban -- see
+        # warm_statusline_weekly_window_false_stale_gap_20260902 memory):
+        # statusline-usage-export.py deliberately only advances a window's
+        # collected_at_unix when its VALUE changes (documented, accepted
+        # tradeoff there -- fails safe, not silently). The weekly percentage
+        # is coarse (integer, rolling 7-day window) and can go a genuine
+        # HOUR+ without moving even while the tracker session is perfectly
+        # healthy (the same slow-drift behavior already documented in the
+        # claude-usage-check skill for the raw oauth/usage endpoint). Using
+        # the same 15-minute default here made the whole cache reject
+        # itself on a healthy tracker purely because seven_day hadn't
+        # ticked -- not a real outage. 8 hours mirrors the skill's own
+        # observed "can stick for 6-8+ hours" note; still short enough to
+        # catch a genuinely dead tracker session well before a stale number
+        # could mislead anyone.
+        "seven_day": 8 * 60,
+    },
 }
 
 # Window length in seconds, keyed by the Claude window's dict key. Codex
@@ -447,11 +469,18 @@ def _claude_cli_version():
         return "unknown"
 
 
-def _read_statusline_cache(max_age_minutes):
+def _read_statusline_cache(max_age_minutes, max_age_overrides=None):
     """Return (windows_dict, age_minutes) from a dedicated tracker session's
     statusLine export (statusline-usage-export.py), or (None, None) if it
     doesn't exist, is unparseable, or either required window is missing/
     invalid/individually stale.
+
+    max_age_overrides: optional {window_key: minutes} dict giving a
+    DIFFERENT freshness ceiling for specific windows (e.g. seven_day, which
+    can legitimately go far longer without its collected_at_unix advancing
+    -- see claude_statusline_cache_max_age_min_by_window in CONFIG and the
+    2026-09-02 false-stale finding). Falls back to max_age_minutes for any
+    window not listed.
 
     This exists because /api/oauth/usage 403s for any setup-token-scoped
     fleet token (see docs/usage-percent-oauth-scope-root-cause-20260901.md)
@@ -521,7 +550,10 @@ def _read_statusline_cache(max_age_minutes):
         if not isinstance(collected_at, (int, float)):
             return None, None
         age_minutes = (now_ts - collected_at) / 60.0
-        if age_minutes < 0 or age_minutes > max_age_minutes:
+        window_ceiling = max_age_minutes
+        if isinstance(max_age_overrides, dict) and required_key in max_age_overrides:
+            window_ceiling = max_age_overrides[required_key]
+        if age_minutes < 0 or age_minutes > window_ceiling:
             return None, None
         ages.append(age_minutes)
 
@@ -699,7 +731,10 @@ def collect_claude():
     # -- it is genuinely authoritative (sourced from the account's own real
     # inference responses) and needs no network call, so it skips straight
     # past the now-expected 403/429 from a setup-token-scoped fleet token.
-    sl_windows, sl_age = _read_statusline_cache(CONFIG["claude_statusline_cache_max_age_min"])
+    sl_windows, sl_age = _read_statusline_cache(
+        CONFIG["claude_statusline_cache_max_age_min"],
+        CONFIG.get("claude_statusline_cache_max_age_min_by_window"),
+    )
     if sl_windows is not None:
         result["source"] = "authoritative_statusline"
         result["windows"] = sl_windows
