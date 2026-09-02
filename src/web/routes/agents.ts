@@ -115,6 +115,7 @@ import { detectReauthNeeded } from '../reauth-detect.js'
 import { readAutoRestartConfig, writeAutoRestartConfig } from '../auto-restart-store.js'
 import { readContextGuardConfig, writeContextGuardConfig } from '../context-guard-store.js'
 import { getContextGuardStatus } from '../context-guard-runner.js'
+import { readGateConfig, writeGateConfig } from '../context-restart-gate-store.js'
 import type { AutoRestartConfig } from '../../auto-restart.js'
 import type { ContextGuardConfig } from '../../context-guard.js'
 // Derived from the DEFAULT config objects, not hand-listed: a field added to
@@ -122,6 +123,7 @@ import type { ContextGuardConfig } from '../../context-guard.js'
 // drift away from what normalize*Config() actually reads.
 import { DEFAULT_AUTO_RESTART } from '../../auto-restart.js'
 import { DEFAULT_CONTEXT_GUARD } from '../../context-guard.js'
+import { DEFAULT_GATE_CONFIG } from '../../context-restart-gate.js'
 import { setStoreWriteActor } from '../../store-watcher.js'
 import { attemptChannelMcpReconnect } from '../channel-mcp-reconnect.js'
 import { getChannelHealth } from '../channel-health-monitor.js'
@@ -1331,6 +1333,54 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   // for every agent, main included.
   if (path === '/api/context-guard' && method === 'GET') {
     json(res, { ok: true, agents: getContextGuardStatus() })
+    return true
+  }
+
+  // GET/PUT /api/agents/:name/context-restart-gate -- per-agent proactive
+  // context-restart-gate config (kanban 0d8bf173), same shape and rules as
+  // context-guard just above: default-off (opt-in), GET returns the disabled
+  // defaults for an agent with no store entry, PUT normalizes server-side and
+  // rejects unknown keys via checkConfigPutFields instead of swallowing them.
+  //
+  // This is NOT an inert config surface: context-restart-gate-runner.ts's
+  // startContextRestartGateRunner() (started at dashboard boot, web.ts) is
+  // already sweeping every agent and calls readGateConfig(name) fresh on
+  // every tick (context-restart-gate-runner.ts:checkAgent/scheduleSweep). A
+  // PUT here with enabled:true takes effect on the agent's NEXT scheduled
+  // sweep (up to its own retryIntervalMs later) -- no separate "activation"
+  // step exists or is needed. See context-restart-gate-runner-wiring.test.ts
+  // for a direct proof that the store write reaches the live sweep.
+  //
+  // PUT replaces the stored config wholesale (normalizeGateConfig fills any
+  // field the body omits from DEFAULT_GATE_CONFIG, it does not merge onto the
+  // agent's previously-stored values) -- same contract as auto-restart and
+  // context-guard above. A caller doing a partial update must GET first and
+  // send back the full object, or a prior non-default threshold silently
+  // reverts to default. See agent-put-fields.test.ts for the pinned case.
+  const contextRestartGateMatch = path.match(/^\/api\/agents\/([^/]+)\/context-restart-gate$/)
+  if (contextRestartGateMatch && (method === 'GET' || method === 'PUT')) {
+    let name: string
+    try { name = decodeURIComponent(contextRestartGateMatch[1]) }
+    catch { json(res, { error: 'Invalid agent name encoding' }, 400); return true }
+    // isKnownAgent() try/catches its own agentDir()/safeJoin() lookup, so a
+    // name carrying a traversal component (../, %2e%2e%2f after decode, ...)
+    // resolves to a clean 404 instead of an uncaught safeJoin() throw.
+    if (!isKnownAgent(name)) { json(res, { error: 'Agent not found' }, 404); return true }
+    if (method === 'GET') {
+      json(res, { ok: true, contextRestartGate: readGateConfig(name) })
+      return true
+    }
+    const body = await readBody(req)
+    let data: unknown
+    try { data = JSON.parse(body.toString()) } catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    const crgFields = checkConfigPutFields(data, Object.keys(DEFAULT_GATE_CONFIG))
+    if (!crgFields.ok) {
+      json(res, { error: crgFields.message, rejected: crgFields.rejected, known: Object.keys(DEFAULT_GATE_CONFIG) }, 400)
+      return true
+    }
+    setStoreWriteActor('dashboard')
+    const saved = writeGateConfig(name, data)
+    json(res, { ok: true, contextRestartGate: saved })
     return true
   }
 

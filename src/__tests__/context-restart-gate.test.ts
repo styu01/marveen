@@ -54,6 +54,63 @@ describe('normalizeGateConfig', () => {
   it('accepts a custom valid threshold', () => {
     expect(normalizeGateConfig({ thresholdTokens: 300_000 }).thresholdTokens).toBe(300_000)
   })
+
+  // Codex review (kanban 0d8bf173): checkConfigPutFields only guards KEYS, not
+  // values -- an out-of-range or wrong-typed value must still be coerced here,
+  // for every numeric field, not just thresholdTokens above.
+  it('coerces NaN, Infinity, zero and negative to default -- for all four numeric fields', () => {
+    for (const bad of [NaN, Infinity, -Infinity, 0, -1, -1_000_000]) {
+      const cfg = normalizeGateConfig({
+        thresholdTokens: bad, staleCutoffMs: bad, retryIntervalMs: bad, persistentBlockAlertMs: bad,
+      })
+      expect(cfg.thresholdTokens).toBe(DEFAULT_GATE_CONFIG.thresholdTokens)
+      expect(cfg.staleCutoffMs).toBe(DEFAULT_GATE_CONFIG.staleCutoffMs)
+      expect(cfg.retryIntervalMs).toBe(DEFAULT_GATE_CONFIG.retryIntervalMs)
+      expect(cfg.persistentBlockAlertMs).toBe(DEFAULT_GATE_CONFIG.persistentBlockAlertMs)
+    }
+  })
+
+  it('coerces a non-number (string, null, object, array) to default -- for all four numeric fields', () => {
+    for (const bad of ['300000', null, {}, [], undefined, true]) {
+      const cfg = normalizeGateConfig({
+        thresholdTokens: bad, staleCutoffMs: bad, retryIntervalMs: bad, persistentBlockAlertMs: bad,
+      })
+      expect(cfg.thresholdTokens).toBe(DEFAULT_GATE_CONFIG.thresholdTokens)
+      expect(cfg.staleCutoffMs).toBe(DEFAULT_GATE_CONFIG.staleCutoffMs)
+      expect(cfg.retryIntervalMs).toBe(DEFAULT_GATE_CONFIG.retryIntervalMs)
+      expect(cfg.persistentBlockAlertMs).toBe(DEFAULT_GATE_CONFIG.persistentBlockAlertMs)
+    }
+  })
+
+  it('floors a valid fractional value instead of storing it as-is', () => {
+    expect(normalizeGateConfig({ thresholdTokens: 300_000.7 }).thresholdTokens).toBe(300_000)
+  })
+
+  it('accepts a custom valid value for every numeric field, not just thresholdTokens', () => {
+    const cfg = normalizeGateConfig({
+      thresholdTokens: 250_000, staleCutoffMs: 60_000, retryIntervalMs: 30_000, persistentBlockAlertMs: 90_000,
+    })
+    expect(cfg).toEqual({
+      enabled: false,
+      thresholdTokens: 250_000, staleCutoffMs: 60_000, retryIntervalMs: 30_000, persistentBlockAlertMs: 90_000,
+    })
+  })
+
+  it('only accepts the literal boolean true for enabled -- truthy non-booleans fall back to false', () => {
+    // A client that PUTs {"enabled": "true"} or {"enabled": 1} (both truthy in
+    // JS, neither valid JSON-boolean-true) must NOT silently arm the gate.
+    expect(normalizeGateConfig({ enabled: 'true' }).enabled).toBe(false)
+    expect(normalizeGateConfig({ enabled: 1 }).enabled).toBe(false)
+    expect(normalizeGateConfig({ enabled: 'false' }).enabled).toBe(false)
+    expect(normalizeGateConfig({ enabled: false }).enabled).toBe(false)
+    expect(normalizeGateConfig({ enabled: true }).enabled).toBe(true)
+  })
+
+  it('a non-object body normalizes to the full disabled default, not a partial/garbled config', () => {
+    for (const bad of [null, undefined, 'x', 42, []]) {
+      expect(normalizeGateConfig(bad)).toEqual(DEFAULT_GATE_CONFIG)
+    }
+  })
 })
 
 describe('decideGate -- disabled', () => {

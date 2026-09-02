@@ -380,7 +380,12 @@ function getLiveWorkChildArgs(session: string, mcpPatterns: string[]): string[] 
 
 // ---- Gate check for one agent -----------------------------------------------
 
-async function checkAgent(name: string, nowMs: number): Promise<void> {
+// Exported (not just called from scheduleSweep) so the wiring between the
+// config store and the live sweep can be proven directly in tests: PUT
+// .../context-restart-gate {enabled:true} is worthless unless something
+// actually reads it and acts, and the only honest way to show that is to call
+// the same function the running sweep calls, not just assert on the store.
+export async function checkAgent(name: string, nowMs: number): Promise<void> {
   const cfg = readGateConfig(name)
   if (!cfg.enabled) return   // fast-exit without touching state
 

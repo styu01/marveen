@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { checkAgentPutFields, checkConfigPutFields, AGENT_PUT_WRITABLE_FIELDS } from '../web/agent-put-fields.js'
 import { DEFAULT_CONTEXT_GUARD } from '../context-guard.js'
 import { DEFAULT_AUTO_RESTART } from '../auto-restart.js'
+import { DEFAULT_GATE_CONFIG } from '../context-restart-gate.js'
 
 // PUT /api/agents/:name answered 200 {ok:true} to fields it did not understand
 // and quietly dropped them. A securityProfile was set that way four times on
@@ -160,6 +161,61 @@ describe('checkConfigPutFields', () => {
       'enabled', 'saturationRestart', 'actPct', 'hardPct',
       'limitTokens', 'cooldownMinutes', 'handoffTimeoutMinutes',
       'idleFlushEnabled', 'idleFlushTokens', 'idleMinutes',
+    ])
+  })
+})
+
+// GET/PUT /api/agents/:name/context-restart-gate (kanban 0d8bf173) is built on
+// the exact same checkConfigPutFields rule as context-guard/auto-restart above
+// -- same hole, same fix: an unknown key must be a loud 400, not a config that
+// looks saved but was never applied.
+describe('checkConfigPutFields -- context-restart-gate', () => {
+  const gateFields = Object.keys(DEFAULT_GATE_CONFIG)
+
+  it('accepts a full round-tripped config (GET then PUT back)', () => {
+    expect(checkConfigPutFields({ ...DEFAULT_GATE_CONFIG }, gateFields).ok).toBe(true)
+  })
+
+  it('accepts a partial config -- only unknown KEYS are refused, not missing ones', () => {
+    expect(checkConfigPutFields({ enabled: true }, gateFields).ok).toBe(true)
+    expect(checkConfigPutFields({}, gateFields).ok).toBe(true)
+  })
+
+  it('refuses a near-miss (typo/transposition) of a real field', () => {
+    const r = checkConfigPutFields({ thresholdToken: 400_000, staleCutoffMS: 1000 }, gateFields)
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.rejected).toEqual(['thresholdToken', 'staleCutoffMS'])
+  })
+
+  it('names every unknown field and keeps the known ones out of the list', () => {
+    const r = checkConfigPutFields({ enabled: true, thresholdTokns: 1, nonsense: 1 }, gateFields)
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.rejected).toEqual(['thresholdTokns', 'nonsense'])
+    expect(r.rejected).not.toContain('enabled')
+  })
+
+  it('tells the caller which fields the endpoint does know', () => {
+    const r = checkConfigPutFields({ thresholdTokns: 1 }, gateFields)
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.message).toContain('thresholdTokens')
+  })
+
+  it('rejects a body that is not an object at all', () => {
+    expect(checkConfigPutFields(null, gateFields).ok).toBe(false)
+    expect(checkConfigPutFields('enabled=true', gateFields).ok).toBe(false)
+    expect(checkConfigPutFields(42, gateFields).ok).toBe(false)
+  })
+
+  it('derives the known set from the default config, so it cannot drift', () => {
+    // The route passes Object.keys(DEFAULT_GATE_CONFIG). If GateConfig grows a
+    // field without a matching default, normalizeGateConfig() would still read
+    // it while this check refused it -- pinned so that mismatch fails here.
+    expect(gateFields).toEqual([
+      'enabled', 'thresholdTokens', 'staleCutoffMs',
+      'retryIntervalMs', 'persistentBlockAlertMs',
     ])
   })
 })
