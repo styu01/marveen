@@ -40,6 +40,10 @@ if [ -f "$INSTALL_DIR/.env" ]; then
   # the update preflight's clean-tree check and silently reverts to the
   # repository's value on the next update. .env is per-install and gitignored.
   MAIN_AGENT_MODEL="$(grep -E '^MAIN_AGENT_MODEL=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2-)"
+  # Same rationale, same route, for effort (EFFORT806, 2026-09-02): a
+  # per-install override belongs in the gitignored .env, not in the tracked
+  # settings.json.
+  MAIN_AGENT_EFFORT="$(grep -E '^MAIN_AGENT_EFFORT=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2-)"
   # Optional per-install diagnostic toggle (default OFF). When set to 1,
   # passes claude's native --debug mcp --debug-file so plugin/MCP lifecycle
   # events (why the channel plugin failed to come up) land in
@@ -165,9 +169,46 @@ resolve_main_model() {
   fi
 }
 
+# Resolve the main agent's reasoning effort so we can pass --effort explicitly.
+# EFFORT806 (2026-09-02, Istvan): .claude/settings.json's "effort" key
+# (present since commit c60e030, tracked, "high") was never actually reaching
+# the running session -- unlike --model, the claude invocation below had no
+# corresponding --effort flag, so the CLI silently used its own built-in
+# default (medium) regardless of what settings.json said. Found live: the
+# main agent's own system-prompt reasoning_effort read as a medium-ish value
+# while every sub-agent (whose launch path DOES pass --effort, via a
+# different code path in agent-process.ts) correctly showed "high" in its own
+# footer. Same precedence pattern as resolve_main_model: an explicit env var
+# wins over settings.json, and an empty result means "omit the flag, let the
+# CLI use its own default" -- there is no distribution-default fallback here
+# (unlike the model case) because a missing effort setting is not a silent
+# regression the way a model drift would be.
+resolve_main_effort() {
+  if [ -n "${MAIN_AGENT_EFFORT:-}" ]; then
+    printf '%s' "$MAIN_AGENT_EFFORT"
+    return 0
+  fi
+  local _e=""
+  if [ -f "$INSTALL_DIR/.claude/settings.json" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      _e="$(jq -r '.effort // empty' "$INSTALL_DIR/.claude/settings.json" 2>/dev/null)"
+    else
+      _e="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("effort") or "")' "$INSTALL_DIR/.claude/settings.json" 2>/dev/null)"
+    fi
+  fi
+  printf '%s' "$_e"
+}
+
 # Test seam: print the resolved model and exit before any side effect.
 if [ "${1:-}" = "--resolve-main-model" ]; then
   resolve_main_model
+  echo
+  exit 0
+fi
+
+# Test seam: print the resolved effort and exit before any side effect.
+if [ "${1:-}" = "--resolve-main-effort" ]; then
+  resolve_main_effort
   echo
   exit 0
 fi
@@ -491,6 +532,14 @@ MODEL_FLAG=""
 # tmux command-string round-trip without the inner shell glob-expanding `[1m]`.
 [ -n "$MAIN_MODEL" ] && MODEL_FLAG="--model '$MAIN_MODEL' "
 
+# EFFORT806: same treatment as MODEL_FLAG above -- see resolve_main_effort()
+# for why this was missing. Values are plain words (low/medium/high/xhigh/max,
+# per `claude --help`), no bracket/glob characters possible, but single-quoted
+# anyway for consistency with MODEL_FLAG's tmux command-string handling.
+MAIN_EFFORT="$(resolve_main_effort)"
+EFFORT_FLAG=""
+[ -n "$MAIN_EFFORT" ] && EFFORT_FLAG="--effort '$MAIN_EFFORT' "
+
 DEBUG_FLAG=""
 [ "$CHANNELS_DEBUG_LOG" = "1" ] && DEBUG_FLAG="--debug mcp --debug-file '$INSTALL_DIR/store/channels-debug.log' "
 
@@ -722,7 +771,7 @@ $TMUX set-environment -g CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION false 2>/dev/null 
 # otherwise new-session below fails with "duplicate session".
 $TMUX kill-session -t "$SESSION" 2>/dev/null || true
 $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
-  "${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+  "${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
 
 # Session startup guard: a Claude Code first-run dialogusait auto-accept-eljuk
 # kulonben a headless session orokre parkolna a prompton es a Telegram plugin
@@ -763,7 +812,7 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
         # entry); see the PR description / card 7EB18437.
         [ -e "$INSTALL_DIR/CLAUDE.md" ] && ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
         $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
-          "${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+          "${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
         unset _CHANNELS_STARTDIR
       fi
       continue
