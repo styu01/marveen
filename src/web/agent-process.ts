@@ -23,7 +23,7 @@ import {
   detectsModelConsentDialog,
   type FirstRunGateKind,
 } from '../pane-state.js'
-import { agentDir, listAgentNames, readAgentModel, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentMemoryIsolation } from './agent-config.js'
+import { agentDir, listAgentNames, readAgentModel, readAgentEffort, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentMemoryIsolation } from './agent-config.js'
 import { resolveAgentConfigDir } from './claude-plans.js'
 import { provisionMemoryBoundaryDir } from './memory-boundary.js'
 import { renameSharedCredentialsIfSafe } from './claude-credentials-guard.js'
@@ -1041,7 +1041,8 @@ function startRemoteAgentProcess(
   }
 
   const model = readAgentModel(name)
-  const cmd = buildRemoteLaunchCommand({ workdir, model, continue: hasPriorSession })
+  const effort = readAgentEffort(name)
+  const cmd = buildRemoteLaunchCommand({ workdir, model, effort, continue: hasPriorSession })
 
   try {
     runTmux(host, ['new-session', '-d', '-s', session, cmd], { timeout: 10000 })
@@ -1156,6 +1157,9 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     // `openrouter-auto:<tier>` resolves to the tier's current recommended model
     // (weekly-refreshed); a concrete OpenRouter id (contains '/') passes through.
     const model = resolveOpenRouterModel(readAgentModel(name))
+    // EFFORT806-B (2026-09-03): '' when the agent has no effortLevel set --
+    // see readAgentEffort()'s comment for why there is no invented default.
+    const effort = readAgentEffort(name)
     const authMode = readAgentAuthMode(name)
     const isClaude = model.startsWith('claude-')
     const isDeepseek = model.startsWith('deepseek-')
@@ -1462,7 +1466,11 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     // values like `claude-opus-4-8[1m]` (1M-context suffix) from being glob-expanded AND makes a `'`
     // in the value inert rather than a quote-break -> command injection. Same escape at the three
     // ANTHROPIC_MODEL env sites above.
-    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${autoUpdaterEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${ollamaEnv}${deepseekEnv}${openrouterEnv}cd "${dir}" && ${claudeBin()} ${continueFlag}${skipFlag}--model ${shSingleQuote(model)} ${channelFlag}`.trimEnd()
+    // EFFORT806-B: same escaping rationale, same "empty means omit" contract as
+    // readAgentEffort() -- see that function for why this was missing entirely
+    // until now (2026-09-02 audit finding B, effortLevel was dead config data).
+    const effortFlag = effort ? `--effort ${shSingleQuote(effort)} ` : ''
+    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${autoUpdaterEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${ollamaEnv}${deepseekEnv}${openrouterEnv}cd "${dir}" && ${claudeBin()} ${continueFlag}${skipFlag}--model ${shSingleQuote(model)} ${effortFlag}${channelFlag}`.trimEnd()
     runTmux(null, ['new-session', '-d', '-s', session, cmd], { timeout: 10000 })
 
     logger.info({ name, session, channelDir: agentChannelDir }, 'Agent tmux session started')

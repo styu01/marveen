@@ -603,6 +603,40 @@ export function readConfiguredMainModel(projectRoot: string = PROJECT_ROOT): str
   return DISTRIBUTION_DEFAULT_AGENT_MODEL
 }
 
+// Read the main agent's configured reasoning effort so a soft resume/recovery
+// respawn passes --effort explicitly, mirroring resolve_main_effort() in
+// scripts/channels.sh -- same PRECEDENCE (.env MAIN_AGENT_EFFORT wins over
+// .claude/settings.json's "effort" key) and same "no invented default"
+// contract as readConfiguredMainModel() above, minus the distribution-default
+// fallback (effort has none; an unset value legitimately means omit the flag,
+// letting the CLI use its own default, same reasoning as channels.sh).
+//
+// EFFORT806-B (2026-09-03): da4c801 wired --effort into channels.sh's TWO
+// cold-boot launch lines but never into this RESPAWN path -- the exact same
+// split that RESPAWNMODEL807 fixed for --model (a launch-path fix that never
+// reached the separate recovery-respawn code, so a session respawned by
+// channel-monitor.ts after boot silently lost the setting). Found during
+// KISPROGI's 2026-09-02 audit and confirmed live: the running bela-channels
+// session's actual process (a respawn, not the post-commit service restart)
+// had --model but no --effort in its real /proc/<pid>/cmdline despite
+// settings.json's "effort": "high".
+export function readConfiguredMainEffort(projectRoot: string = PROJECT_ROOT): string {
+  const fromEnv = readEnvValue(projectRoot, 'MAIN_AGENT_EFFORT')
+  if (fromEnv) return fromEnv
+  try {
+    const settingsPath = join(projectRoot, '.claude', 'settings.json')
+    if (existsSync(settingsPath)) {
+      const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+      const effort = parsed?.effort
+      if (typeof effort === 'string' && effort.trim()) return effort.trim()
+    }
+  } catch {
+    // fall through -- unlike model, there is no distribution-default fallback
+    // for effort; an unreadable/missing settings file just means omit the flag
+  }
+  return ''
+}
+
 // Secondary channel plugins the main session co-listens on, read from .env
 // CHANNEL_PLUGINS_EXTRA (space-separated plugin ids) exactly as scripts/channels.sh
 // derives its EXTRA_CHANNELS. Kept OUT of buildMainSessionRespawnCmd so that stays
@@ -632,6 +666,12 @@ export function buildMainSessionRespawnCmd(opts: {
   claudePath: string
   pluginId: string
   model: string
+  /**
+   * Reasoning effort (low/medium/high/xhigh/max, per `claude --help`), from
+   * readConfiguredMainEffort(). '' omits the flag -- see that function's
+   * comment for why there is no fallback default here, unlike model.
+   */
+  effort?: string
   continueSession: boolean
   /**
    * When set (macOS main-agent isolation on), the respawn exports this isolated
@@ -686,6 +726,9 @@ export function buildMainSessionRespawnCmd(opts: {
     // allowlist is the belt, this is the braces). shSingleQuote makes the value
     // one inert shell word. See model-id-injection.test.ts.
     ...(opts.model ? ['--model', shSingleQuote(opts.model)] : []),
+    // EFFORT806-B: same escaping rationale as --model just above -- see
+    // readConfiguredMainEffort() for why this can legitimately be empty.
+    ...(opts.effort ? ['--effort', shSingleQuote(opts.effort)] : []),
     [`--channels plugin:${opts.pluginId}`, ...(opts.extraPluginIds ?? []).map((p) => `plugin:${p}`)].join(' '),
   ].join(' ')
 }
@@ -724,6 +767,7 @@ export function respawnMainSessionFresh(): void {
     pluginId: provider.pluginId,
     extraPluginIds: readExtraChannelPluginIds(),
     model: readConfiguredMainModel(),
+    effort: readConfiguredMainEffort(),
     // The main session always starts a new conversation -- this is the whole
     // point of the nightly restart (drop the accumulated context).
     continueSession: false,
@@ -794,6 +838,7 @@ export async function resumeMarveenSession(): Promise<boolean> {
       pluginId: provider.pluginId,
       extraPluginIds: readExtraChannelPluginIds(),
       model: readConfiguredMainModel(),
+      effort: readConfiguredMainEffort(),
       continueSession: true,
       // Parity with channels.sh: a recovery respawn must also land on the
       // isolated CLAUDE_CONFIG_DIR (macOS), else it re-authenticates from the
@@ -1049,6 +1094,7 @@ function respawnMarveenSessionFresh(): boolean {
       pluginId: provider.pluginId,
       extraPluginIds: readExtraChannelPluginIds(),
       model: readConfiguredMainModel(),
+      effort: readConfiguredMainEffort(),
       continueSession: false,
       // Same channels.sh-bypass concern as resumeMarveenSession: this fresh
       // respawn also skips channels.sh, so it must carry the isolated config

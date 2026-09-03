@@ -121,6 +121,31 @@ export function readAgentModel(name: string): string {
   return resolveAgentModelDetailed(name).model
 }
 
+// EFFORT806-B (2026-09-03): per-agent reasoning effort, config-driven like
+// readAgentModel. Several agents (autobot/kisprogi/progi/vizsla/okoska) have
+// carried an `effortLevel` field in agent-config.json since their scaffold
+// was created, but nothing ever read it -- startAgentProcess's launch command
+// passed --model only, so every sub-agent silently ran on the CLI's own
+// built-in default regardless of this field (found during KISPROGI's
+// 2026-09-02 audit of the da4c801 --effort fix, which wired the flag for the
+// MAIN agent's launch path but not this one; that commit's own claim that
+// sub-agents "already pass --effort via a different code path" did not hold
+// up against the source). Unlike model there is no distribution-default
+// fallback: an agent with no effortLevel set (or an unreadable config) just
+// returns '', so the caller omits the --effort flag entirely and the CLI
+// falls back to its own default -- the same "absent means omit, no invented
+// default" contract as scripts/channels.sh's resolve_main_effort() and
+// channel-monitor.ts's readConfiguredMainEffort() for the main agent.
+export function readAgentEffort(name: string): string {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  try {
+    const config = JSON.parse(readFileOr(configPath, '{}'))
+    const raw = typeof config.effortLevel === 'string' ? config.effortLevel.trim() : ''
+    if (raw) return raw
+  } catch { /* fall through -- unreadable config just means no explicit effort */ }
+  return ''
+}
+
 // Card c755f4b2 Block B. Passing null REMOVES the key rather than writing a
 // null: an absent field and an explicit null must not become two ways of
 // saying the same thing in a config a human also edits by hand.

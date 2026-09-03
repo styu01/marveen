@@ -67,6 +67,20 @@ describe('buildRemoteLaunchCommand', () => {
     expect(cmd).not.toContain('ANTHROPIC_API_KEY')
     expect(cmd).not.toContain('TELEGRAM')
   })
+
+  // EFFORT806-B (2026-09-03): closed for consistency with the other two
+  // launch sinks (main-agent respawn, local sub-agent launch) even though no
+  // agent is remote-configured today -- see buildRemoteLaunchCommand's own
+  // comment.
+  it('includes a quoted --effort when given one', () => {
+    const cmd = buildRemoteLaunchCommand({ workdir: '/home/user/p', model: 'claude-sonnet-5', effort: 'high', continue: false })
+    expect(cmd).toContain("--effort 'high'")
+  })
+
+  it('omits --effort when not given (undefined) or empty, same "no invented default" contract as model', () => {
+    expect(buildRemoteLaunchCommand({ workdir: '/p', model: 'm', continue: false })).not.toContain('--effort')
+    expect(buildRemoteLaunchCommand({ workdir: '/p', model: 'm', effort: '', continue: false })).not.toContain('--effort')
+  })
 })
 
 describe('classifyRunState', () => {

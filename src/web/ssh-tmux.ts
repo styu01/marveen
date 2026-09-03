@@ -143,11 +143,22 @@ export function classifyRunStateFromExit(
 export function buildRemoteLaunchCommand(opts: {
   workdir: string
   model: string
+  /**
+   * EFFORT806-B (2026-09-03): mirrors readAgentEffort()'s "empty means omit"
+   * contract, same as the local sub-agent launch path in agent-process.ts and
+   * the main agent's launch/respawn paths. No remote agent is configured
+   * today (no agent-config.json currently carries a `host`), but this path
+   * had the identical --effort gap as the other two launch sites, so it is
+   * closed here for consistency rather than left as a latent trap for the
+   * first remote agent someone configures.
+   */
+  effort?: string
   continue: boolean
 }): string {
   const path = 'export PATH="$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"'
   const cont = opts.continue ? '--continue ' : ''
-  return `${path} && cd ${shQuote(opts.workdir)} && claude ${cont}--dangerously-skip-permissions --model ${shQuote(opts.model)}`
+  const effortFlag = opts.effort ? `--effort ${shQuote(opts.effort)} ` : ''
+  return `${path} && cd ${shQuote(opts.workdir)} && claude ${cont}--dangerously-skip-permissions --model ${shQuote(opts.model)} ${effortFlag}`.trimEnd()
 }
 
 /**
