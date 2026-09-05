@@ -205,10 +205,12 @@ export function resolveStuckTimeoutMs(
 // margin-reduced value -- see nextSkipIfBusyStreak/
 // SKIP_IF_BUSY_GAP_JITTER_MARGIN_MS below -- NOT the raw escalation
 // threshold itself) -- i.e., we only trust continuity across a gap we could
-// plausibly have caught a recovery within. A larger gap (any cadence at or
-// above the gap tolerance, and ALSO any long, incidental gap in a
-// short-cadence task's own observations -- see the paragraph below) discards
-// the old streak and starts a fresh one from `now`. See
+// plausibly have caught a recovery within. A larger gap (any OBSERVED gap at
+// or above the gap tolerance -- whether because the task's own cadence
+// structurally cannot produce closer observations, or because one otherwise-
+// short-cadence occurrence happened to land far apart due to some other
+// incidental interruption -- see the paragraph below) discards the old
+// streak and starts a fresh one from `now`. See
 // nextSkipIfBusyStreak's own doc comment for the exact rule.
 //
 // This has an accepted, EXPLICIT consequence for cadences comfortably above
