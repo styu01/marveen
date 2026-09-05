@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
-import { listAgentNames, readAgentClaudeConfigDir } from './agent-config.js'
+import { listAllAgentNames, readAgentClaudeConfigDir } from './agent-config.js'
 import { agentSessionName, capturePane } from './agent-process.js'
 import { detectPaneState } from '../pane-state.js'
 import { detectsUsageLimit } from '../model-fallback.js'
@@ -542,7 +542,17 @@ function scheduleSweep(name: string, delayMs: number): void {
 
 export function startContextRestartGateRunner(): void {
   // Stagger each agent slightly so they don't all hit the DB simultaneously.
-  const agents = [MAIN_AGENT_ID, ...listAgentNames()]
+  //
+  // listAllAgentNames(), NOT listAgentNames() (USAGETRACK904, 2026-09-04): a
+  // dashboard-hidden technical worker (HIDDEN_AGENT_SENTINEL) is hidden from
+  // the OPERATOR, not from the fleet's life support -- the identical mistake
+  // context-guard-runner.ts's guardSweepAgentNames() was already fixed for
+  // after the 2026-08-04 agents/heartbeat incident (see that function's own
+  // comment). No agent carries the sentinel today, so this was not yet live-
+  // broken, but the two sibling runners protecting the SAME class of session
+  // must agree on who they sweep, or the next agent hidden from the dashboard
+  // silently loses this gate exactly the way heartbeat lost the hard guard.
+  const agents = [MAIN_AGENT_ID, ...listAllAgentNames()]
   const seen = new Set<string>()
   let offset = 0
   for (const name of agents) {
