@@ -157,6 +157,294 @@ export function resolveStuckTimeoutMs(
   return Math.min(Math.max(configured * 60_000, 60_000), maxMs)
 }
 
+// --- skipIfBusy persistent-busy escalation ---
+//
+// skipIfBusy exists so a short-cadence heartbeat does not spam a pending-retry
+// row (and eventually a Telegram alert) every time its target session happens
+// to be busy for one tick, most commonly because the operator is having an
+// active conversation in it (see the skipIfBusy branch below: "a single
+// missed tick is harmless because the next one is already on the way").
+//
+// That assumption breaks when "busy" is not a live turn but a WEDGED session
+// that will never clear on its own -- observed 2026-09-05 (Bela): a WSL
+// sleep/resume left usage-tracker-poll's target session pinned "busy" (a turn
+// that started before the host suspended never got a response afterward) for
+// 45+ minutes across MULTIPLE 10-minute skipIfBusy ticks, each silently
+// dropped. No pending-retry row was ever created (skipIfBusy's whole point is
+// to skip that), so no alert fired anywhere -- the session sat wedged until a
+// human happened to notice the pane by hand and nudged it back to life with a
+// tmux send-keys. "A single missed tick is harmless" stops being true once it
+// is not a single tick; this closes that gap without removing the original
+// quiet-single-tick behavior.
+//
+// Design: track how long a given (task, agent) key has been OBSERVED
+// reporting 'busy'. Below the threshold, behavior is unchanged (silent
+// drop). Past it, stop trusting the next tick and hand the key to the
+// EXISTING pending-retry + alert pipeline (insertPendingTaskRetryIfNew, stage
+// 1 BÉLA -> stage 2 owner via ALERT_THRESHOLD_MS/OWNER_ESCALATION_EXTRA_MS in
+// pending-retries.ts) instead of inventing a second alert channel.
+//
+// CRITICAL CORRECTION (Codex review, 2026-09-05, blocking on the first
+// draft): a task is only ever ATTEMPTED (and therefore only ever OBSERVED as
+// busy or not) when its OWN cron matches within a tick's scan window -- this
+// mechanism does not poll independently of that. For a `*/10` heartbeat like
+// usage-tracker-poll that makes consecutive observations genuinely ~10
+// minutes apart, so "elapsed time since the streak started" is a reasonable
+// proxy for "continuously busy". But this repo also ships HOURLY and WEEKLY
+// skipIfBusy tasks (e.g. intel-collector, bumblebee-hygiene-scan) -- for
+// those, two observations of 'busy' a week apart are almost certainly TWO
+// UNRELATED episodes with days of idle in between, not one continuous 30+
+// minute wedge, and naively comparing "now minus first-ever-seen-busy" would
+// misread that as an instantly-overdue escalation. Naive elapsed-time alone
+// cannot tell the two apart.
+//
+// FIX: track BOTH when the current streak started AND when it was LAST
+// independently confirmed busy (lastObservedAt). On every new busy
+// observation, only EXTEND the existing streak if the gap since the last
+// observation is itself smaller than the GAP TOLERANCE (a separate,
+// margin-reduced value -- see nextSkipIfBusyStreak/
+// SKIP_IF_BUSY_GAP_JITTER_MARGIN_MS below -- NOT the raw escalation
+// threshold itself) -- i.e., we only trust continuity across a gap we could
+// plausibly have caught a recovery within. A larger gap (any cadence at or
+// above the gap tolerance, and ALSO any long, incidental gap in a
+// short-cadence task's own observations -- see the paragraph below) discards
+// the old streak and starts a fresh one from `now`. See
+// nextSkipIfBusyStreak's own doc comment for the exact rule.
+//
+// This has an accepted, EXPLICIT consequence for cadences comfortably above
+// the gap tolerance (SKIP_IF_BUSY_ESCALATE_AFTER_MS minus
+// SKIP_IF_BUSY_GAP_JITTER_MARGIN_MS -- ~25 minutes with the current
+// constants): such a task's observations are, by construction, further
+// apart than the gap tolerance, so each one always looks like a fresh
+// streak -- it never escalates via this path. This is the CORRECT, safe
+// default: we have no way to distinguish "wedged the whole time" from "busy
+// at two unrelated moments" for such a task without polling it
+// independently of its own schedule (a materially bigger change, not
+// undertaken here), so refusing to escalate is honest, not merely silent --
+// the ORIGINAL bug this closes (usage-tracker-poll, a `*/10` heartbeat) is
+// unaffected, and any similarly short-cadence skipIfBusy task gets the same
+// protection. Cadences sitting CLOSE to the ~25-minute boundary itself
+// (roughly 20-25 minutes) are NOT given the same firm "never" guarantee --
+// they inherit the same jitter sensitivity the margin exists to fix for the
+// 30-minute case, just at their own boundary; the concretely verified,
+// margin-protected case is a nominal `*/30` cadence against the 30-minute
+// escalation threshold (see SKIP_IF_BUSY_GAP_JITTER_MARGIN_MS's doc comment
+// and its regression test), not a blanket guarantee for every cadence near
+// the gap-tolerance edge.
+//
+// Stale-state scenarios beyond the original "skipIfBusy/forceSend changed
+// mid-flight" case this was first patched for (Codex found several): a
+// quota-gate or pre-check skip for the whole task, or the task being
+// disabled/deleted for a while, are handled the SAME way a slow-cadence
+// task's naturally-spaced observations are -- the gap check discards the old
+// streak IF the resulting gap ends up at or above the gap tolerance, and
+// otherwise treats a SHORT interruption as still-continuous (see the next
+// paragraph for why that is intentional, not a residual gap).
+//
+// ONE scenario needed a DEDICATED fix rather than relying on the gap check
+// (Codex review, 2026-09-05, BLOCKING on the v2 draft): an existing
+// pending-retry row for the SAME key. That row's own retry loop observes the
+// key on EVERY tick (not gated by this task's own cron), so it can resolve
+// -- fire successfully, or the task gets disabled/deleted -- well INSIDE the
+// gap tolerance; but `pendingKeys.has(key)` skips this cron loop's per-agent
+// block entirely while the row exists, so this loop never gets a chance to
+// notice that resolution, and an untouched streak would silently resume the
+// moment the key exits pendingKeys and a later cron tick observes 'busy'
+// again -- even though the retry pipeline had POSITIVE evidence (a
+// successful fire) that the old episode had ended. Fix: `skipIfBusyStreaks`
+// is explicitly cleared the moment a key enters `pendingKeys` (see that
+// registration loop), not left to the gap check -- ownership by the retry
+// pipeline unconditionally resets this tracking, regardless of how long that
+// ownership lasts.
+//
+// PRECISE CLAIM about the REMAINING gap-check-only cases (quota-gate,
+// pre-check, disable/re-enable), not "subsumes every case" (Codex review,
+// 2026-09-05, correcting an overclaim in an earlier draft of this comment): a
+// SHORT interruption from one of those -- one that resolves in LESS than
+// the GAP TOLERANCE (the margin-reduced ~25-minute value, NOT the raw
+// 30-minute SKIP_IF_BUSY_ESCALATE_AFTER_MS -- a 27-minute interruption, for
+// instance, is under 30 but still resets under the real, tighter rule) --
+// does NOT reset the streak; it reads as a
+// continuous episode, same as a single ordinary missed cron tick would. This
+// is INTENTIONAL: the tolerance window exists precisely so a brief,
+// incidental interruption in HOW we observed the session does not throw away
+// otherwise-valid evidence that it stayed busy across it. What the gap check
+// refuses to do is manufacture false continuity across a LONG interruption
+// where we have no such evidence either way -- it does not, and is not meant
+// to, prove that literally every instant between two confirmed-busy
+// observations was itself busy.
+//
+// TIME-TO-ESCALATION IS CADENCE-DEPENDENT, NOT A FIXED 30 MINUTES (Codex
+// review, 2026-09-05, correcting an inaccurate "e.g. 30-min heartbeats"
+// example in an earlier draft): because escalation can only be DECIDED at an
+// actual cron-matched observation, and nextSkipIfBusyStreak's rule is a
+// STRICT `<` on the gap against its own (margin-reduced, ~25-minute) gap
+// tolerance, the real elapsed time at first escalation is the smallest
+// cadence-multiple that is >= SKIP_IF_BUSY_ESCALATE_AFTER_MS -- e.g. a `*/10`
+// task escalates at its 4th consecutive observation (30m elapsed, exactly
+// meeting the boundary); a `*/20` task at its 3rd (40m); a 24-minute cadence
+// (just under the gap tolerance) at its 3rd (48m). A cadence COMFORTABLY
+// ABOVE the gap tolerance -- concretely, a nominal `*/30` even accounting
+// for realistic scheduler jitter (see SKIP_IF_BUSY_GAP_JITTER_MARGIN_MS and
+// its regression test) -- never accumulates past a single observation and so
+// never escalates via this path at all. This is NOT an absolute guarantee
+// for every cadence merely at-or-above the raw ~25-minute gap tolerance
+// value itself -- a cadence sitting very close to that exact boundary
+// inherits the same kind of jitter sensitivity the margin exists to fix for
+// the 30-minute case, just unaddressed at ITS OWN boundary (see the
+// paragraph above); `*/30` is the specific, margin-protected case this
+// mechanism concretely defends, not a stand-in for "everything near 25
+// minutes and up".
+// SKIP_IF_BUSY_ESCALATE_AFTER_MS is best read as the MINIMUM required
+// tolerance before escalation becomes POSSIBLE for a given cadence, not a
+// promise of exactly-30-minutes for every cadence.
+//
+// TOTAL TIME BEFORE AN ALERT FIRES, stated explicitly rather than left
+// implicit (Codex review, 2026-09-05): the retry row this creates starts its
+// OWN clock at insertion time (first_attempt = now) -- it does NOT inherit
+// the time already spent accumulating the streak. So for `*/10` -- the
+// cadence of the ORIGINAL usage-tracker-poll incident this closes, and the
+// most thoroughly analyzed case in this comment, not a claim about it being
+// the fastest cadence this mechanism could ever support -- escalating at
+// exactly 30m elapsed, the nominal total is SKIP_IF_BUSY_ESCALATE_AFTER_MS
+// (30m) + ALERT_THRESHOLD_MS (60m) = 90 minutes before BÉLA is notified, and
+// +OWNER_ESCALATION_EXTRA_MS (75m) = 165 minutes before the owner is
+// notified. These are NOT upper bounds ("at most") -- a slower cadence
+// escalates later (see the paragraph above), the session could already have
+// been busy for a while before the FIRST observation this mechanism ever
+// made, and a dashboard restart or a gap-reset can each add further delay
+// whose exact size is ALSO cadence-dependent, not a fixed
+// SKIP_IF_BUSY_ESCALATE_AFTER_MS (a task rebuilding its streak from scratch
+// takes as long as its own cadence needs to reach the threshold again -- see
+// the paragraph above -- so this is only close to one extra
+// SKIP_IF_BUSY_ESCALATE_AFTER_MS for a `*/10`-or-similar cadence, not in
+// general). Read 90/165 minutes as the POLICY SUM this mechanism
+// deliberately targets for its most-analyzed case (`*/10`), not a
+// guaranteed ceiling for every case. This is INTENTIONAL, not an overlooked
+// delay: it gives a skipIfBusy task roughly the SAME final alert cadence
+// every other scheduled task already has (ALERT_THRESHOLD_MS/
+// OWNER_ESCALATION_EXTRA_MS are the existing,
+// already-relied-upon thresholds, unchanged here), with skipIfBusy's own
+// 30-minute quiet-tolerance layered in FRONT of that shared cadence rather
+// than replacing it or stacking a separate, faster alert path on top. The
+// bar being closed is "never" (the pre-fix behavior), not "as fast as
+// possible" -- a heartbeat whose own SKILL.md says "no real work, just keeps
+// a statusline fresh" does not need a faster worst case than every other
+// task in the fleet already accepts.
+export const SKIP_IF_BUSY_ESCALATE_AFTER_MS = 30 * 60_000
+
+export type SkipIfBusyDecision = 'skip-silently' | 'escalate'
+
+/**
+ * Pure decision: given how long a skipIfBusy task's target has been
+ * OBSERVED continuously busy (ms, per nextSkipIfBusyStreak's gap-tolerant
+ * streak), should this tick keep dropping silently or hand off to the
+ * retry/alert pipeline? See the section comment above for the incident this
+ * closes, the cron-cadence correction, and what "continuously" actually
+ * means here (a chain of observations no two of which are more than the
+ * GAP TOLERANCE apart -- a separate, margin-reduced value nextSkipIfBusyStreak
+ * applies when building that chain, not this function's own `thresholdMs` --
+ * NOT a claim about every instant in between).
+ */
+export function decideSkipIfBusyEscalation(
+  busyStreakMs: number,
+  thresholdMs: number = SKIP_IF_BUSY_ESCALATE_AFTER_MS,
+): SkipIfBusyDecision {
+  return busyStreakMs >= thresholdMs ? 'escalate' : 'skip-silently'
+}
+
+export interface SkipIfBusyStreak {
+  /** ms-epoch when the CURRENT (gap-tolerant) streak began. */
+  startedAt: number
+  /** ms-epoch of the most recent observation that extended this streak. */
+  lastObservedAt: number
+}
+
+// Safety margin subtracted from the escalation threshold when deciding
+// whether a gap between two observations is small enough to trust continuity
+// across it. Codex review (2026-09-05, BLOCKING): observations are timestamped
+// with the runner's actual `now`, not the cron expression's exact intended
+// occurrence instant -- SCHEDULE_TICK_MS (15s) plus ordinary tick-to-tick
+// jitter means a task nominally at `*/30` (exactly SKIP_IF_BUSY_ESCALATE_AFTER_MS)
+// could have consecutive REAL observed gaps land a little under 30 minutes
+// purely by timing luck, letting a streak build and eventually escalate --
+// directly contradicting the "a cadence at or above the threshold can never
+// escalate" claim this whole design relies on for honesty. This repo has a
+// `*/30` skipIfBusy=true template, so this is not hypothetical.
+//
+// Reusing the escalation threshold itself as the gap tolerance (the ORIGINAL,
+// v2 choice) is exactly what made this fragile: a boundary meant to be a hard
+// wall for at-threshold cadences instead became a coin flip decided by
+// scheduler jitter. Subtracting an explicit margin here decouples "how large
+// a gap is still trustworthy" from "how much accumulated time triggers
+// escalation" -- 5 minutes is ~20x SCHEDULE_TICK_MS, comfortable headroom
+// against normal jitter (and even an occasional slow tick), without being so
+// large that it meaningfully narrows the cadences this mechanism protects
+// (anything well under the resulting ~25-minute tolerance, which still
+// comfortably covers `*/10` and similar short-cadence heartbeats).
+export const SKIP_IF_BUSY_GAP_JITTER_MARGIN_MS = 5 * 60_000
+
+/**
+ * Pure: fold one new 'busy' observation into the existing streak (or start a
+ * fresh one). Extends `prev` only when the gap since its last observation is
+ * SMALLER than `maxGapMs` -- otherwise the old streak is discarded and a new
+ * one starts at `now`, because a gap that large means we have no evidence
+ * the session was busy for any of the time in between (see the section
+ * comment above for why this is a full class of stale-state fix, not a
+ * single-scenario patch).
+ *
+ * maxGapMs defaults to SKIP_IF_BUSY_ESCALATE_AFTER_MS MINUS
+ * SKIP_IF_BUSY_GAP_JITTER_MARGIN_MS (25 minutes, not the raw 30) --
+ * deliberately BELOW the escalation threshold, not equal to it (Codex review,
+ * 2026-09-05, correcting the v2 draft's "reuse the same value" choice -- see
+ * SKIP_IF_BUSY_GAP_JITTER_MARGIN_MS's own doc comment for why equality was
+ * unsafe under realistic scheduler jitter).
+ */
+export function nextSkipIfBusyStreak(
+  prev: SkipIfBusyStreak | undefined,
+  now: number,
+  maxGapMs: number = SKIP_IF_BUSY_ESCALATE_AFTER_MS - SKIP_IF_BUSY_GAP_JITTER_MARGIN_MS,
+): SkipIfBusyStreak {
+  if (prev && (now - prev.lastObservedAt) < maxGapMs) {
+    return { startedAt: prev.startedAt, lastObservedAt: now }
+  }
+  return { startedAt: now, lastObservedAt: now }
+}
+
+// (task, agent) key -> the current gap-tolerant busy streak (see
+// nextSkipIfBusyStreak). Deleted the moment the streak breaks (this tick is
+// not itself extending a tracked streak -- see isTrackedSkipIfBusyStreak
+// below) or escalation fires. In memory only, same accepted limitation as
+// taskInflightMap/lastTaskCompletedAtMs below -- does not survive a
+// dashboard restart (bela-dashboard.service). Correction (Codex review,
+// 2026-09-05): this ONLY clears OUR bookkeeping, not the underlying session
+// wedge -- the dashboard process and a sub-agent's own tmux session are
+// separate processes, so a dashboard restart does not, by itself, restart or
+// unstick the wedged agent session (see the fleet's own known "dashboard
+// restart can leave a stuck agent input behind" failure mode). The accepted
+// trade is narrower than "the restart fixes it": a genuinely still-wedged
+// session simply re-accumulates the streak from its NEXT observation and
+// reaches the same threshold again -- delayed by however long that
+// rebuild takes, which is CADENCE-DEPENDENT (see the cadence-to-elapsed-time
+// mapping above), not a fixed extra SKIP_IF_BUSY_ESCALATE_AFTER_MS. For a
+// `*/10`-or-similar cadence that rebuild is close to one more
+// SKIP_IF_BUSY_ESCALATE_AFTER_MS (~30 minutes); a slower (but still
+// protected, i.e. under the gap tolerance) cadence takes correspondingly
+// longer. The alternative (persisting this in a table) was not undertaken
+// for a background heartbeat's own internal bookkeeping.
+//
+// ACCEPTED, UNFIXED LIMITATION (Codex review, 2026-09-05): a key for a task
+// that gets disabled or deleted WHILE it has a live entry here is never
+// observed again, so its entry is never cleared -- it simply sits until the
+// next dashboard restart. Bounded by the number of distinct (task, agent)
+// pairs ever configured with skipIfBusy=true, not by observation count, so
+// for this fleet's actual scale (a handful of such tasks) the leak is
+// negligible; a real eviction sweep (e.g. mirroring
+// TASK_FIRE_MAX_TRACK_MS's age-based eviction in taskInflightMap) was not
+// added because there is currently no task-churn workload where it would
+// matter. Revisit if that changes.
+const skipIfBusyStreaks = new Map<string, SkipIfBusyStreak>()
+
 // Active task/heartbeat injections keyed by `${taskName}@${agentName}`.
 const taskInflightMap = new Map<string, TaskInflightEntry>()
 
@@ -1458,6 +1746,41 @@ export function startScheduleRunner(): NodeJS.Timeout {
     const pendingRows = listPendingTaskRetries()
     const pendingKeys = new Set<string>()
     for (const row of pendingRows) {
+      // Codex review (2026-09-05, BLOCKING -- v3 fix to a v2 ordering gap):
+      // this key comes under this pipeline's ownership the moment a pending
+      // row for it exists, REGARDLESS of what happens to it next (fires,
+      // gets dropped because the task was deleted/disabled meanwhile, or
+      // anything else) -- so the skipIfBusy streak discard below must run
+      // BEFORE any of the early `continue`s that drop a dead row, not after.
+      // The v2 draft placed it after the taskDef-missing/disabled checks,
+      // which meant a task disabled/deleted while its retry was pending kept
+      // its stale streak entry untouched -- exactly the poisoned-re-entry
+      // risk this fix exists to close, just reached via re-enabling the task
+      // later instead of via a successful fire. `pendingKeys.add(key)`
+      // itself still waits until AFTER validation (its own comment below
+      // explains why: the cron loop must not treat a dead row as a reason to
+      // skip), but the streak discard does not need that same guarantee --
+      // discarding a streak for a row that turns out to be dead is harmless
+      // (there was nothing to protect), so it is safe and simpler to do
+      // unconditionally, up front, for every row this loop touches at all.
+      //
+      // The moment this pipeline takes ownership of a key, any skipIfBusy
+      // streak tracked for it must be discarded -- NOT merely left to the
+      // gap check. This retry loop observes the key on EVERY tick (unlike
+      // the cron loop below, which only observes at cron-match), so it can
+      // resolve (fire, or the operator disables/deletes the task) well
+      // inside the gap tolerance, and the cron loop's `pendingKeys.has(key)`
+      // skip (below) means it never gets a chance to notice that resolution
+      // -- an untouched streak would then silently resume as if nothing had
+      // happened the moment this key exits pendingKeys and a cron tick
+      // observes 'busy' again, even though a successful fire in between is
+      // POSITIVE evidence the old episode ended. Discarding unconditionally
+      // is simpler and strictly safer than trying to prove which pending-
+      // retry outcomes count as "resolved" -- it costs nothing but one fresh
+      // SKIP_IF_BUSY_ESCALATE_AFTER_MS grace window on the rare case the
+      // streak was still legitimately live.
+      skipIfBusyStreaks.delete(`${row.task_name}@${row.agent_name}`)
+
       // Locate the task definition. If it was deleted meanwhile, drop the
       // retry silently -- nothing to fire.
       const taskDef = tasks.find(t => t.name === row.task_name)
@@ -1644,8 +1967,31 @@ export function startScheduleRunner(): NodeJS.Timeout {
         const key = `${task.name}@${agentName}`
         // If already queued for retry from an earlier tick, leave it to
         // the retry handler -- don't re-queue or double-fire.
-        if (pendingKeys.has(key)) continue
+        //
+        // Defense in depth (Codex review, 2026-09-05): the retry-registration
+        // loop above already discards any skipIfBusy streak the moment a key
+        // enters pendingKeys (see its own comment for why that is the
+        // primary fix). This second delete is redundant under today's code
+        // but cheap and keeps the invariant "a pending key never has a live
+        // streak entry" true even if a future edit adds another path into
+        // pendingKeys without going through that one line.
+        if (pendingKeys.has(key)) { skipIfBusyStreaks.delete(key); continue }
         const result = await attemptFireTask(task, agentName, now, cronPc.prefix, lateCatchUpMs)
+        // A skipIfBusy busy-streak is tracked ONLY while THIS tick is actually
+        // taking the skip-and-track path below (busy + skipIfBusy + !forceSend).
+        // Every other outcome clears it -- not just "any non-busy result", but
+        // ALSO a 'busy' result that this tick handles some other way. Codex
+        // review (2026-09-05): a task's skipIfBusy/forceSend can change
+        // mid-flight (a config edit between ticks); if such a change routes a
+        // 'busy' result through the plain insertPendingTaskRetryIfNew branch
+        // below instead of the streak-tracked one, the OLD streak entry must
+        // not survive to poison a LATER re-entry into the tracked path -- an
+        // untouched stale timestamp there would make the next tracked busy
+        // episode look like it has already been running for however long the
+        // unrelated earlier episode lasted, causing instant re-escalation
+        // instead of a fresh grace window.
+        const isTrackedSkipIfBusyStreak = result === 'busy' && task.skipIfBusy && !task.forceSend
+        if (!isTrackedSkipIfBusyStreak) skipIfBusyStreaks.delete(key)
         if (result === 'starting') {
           // Agent was auto-started this tick. ALWAYS enqueue the retry that
           // delivers the prompt once the session is ready -- skipIfBusy must
@@ -1659,16 +2005,46 @@ export function startScheduleRunner(): NodeJS.Timeout {
           // state is bypassed. Dropping that on skipIfBusy would turn the
           // deferral into a silent loss, so forceSend is exempt from the
           // skip and always queues the retry.
-          if (task.skipIfBusy && !task.forceSend) {
-            // Opt-in skip for short-cadence tasks (e.g. 30-min heartbeats):
-            // a single missed tick is harmless because the next one is
-            // already on the way, and queueing them produces spurious
-            // "60 perce varakozik" Telegram alerts whenever the operator
-            // is having an active conversation in the channels session.
-            // Daily/weekly schedules keep skipIfBusy=false so the queue
-            // + alert path catches a long-running busy state.
-            logger.info({ task: task.name, agent: agentName }, 'Schedule busy, skipIfBusy=true: dropping tick silently')
-            appendTaskRun(task.name, agentName, 'skipped')
+          if (isTrackedSkipIfBusyStreak) {
+            // Opt-in skip for tasks whose OWNER decided a single missed tick
+            // is harmless because the next one is already on the way (most
+            // commonly a frequent heartbeat, e.g. `*/10`) -- queueing every
+            // busy tick would produce spurious "60 perce varakozik" Telegram
+            // alerts whenever the operator is having an active conversation
+            // in the channels session. Correction (Codex review, 2026-09-05):
+            // NOT tied to cadence in practice -- this repo also has a weekly
+            // skipIfBusy=true task (bumblebee-hygiene-scan), so "daily/weekly
+            // tasks keep skipIfBusy=false" is not a rule the code enforces or
+            // the config follows, only a loose tendency for MOST such tasks.
+            // The escalation logic below applies uniformly regardless of
+            // cadence, but is only EFFECTIVE (can actually accumulate a
+            // streak and fire) for cadences comfortably under the gap
+            // tolerance (~25 minutes -- see SKIP_IF_BUSY_ESCALATE_AFTER_MS's
+            // doc comment); it is not a backstop that protects every
+            // cadence equally.
+            //
+            // BUT that "next tick" assumption fails for a genuinely wedged
+            // session (2026-09-05 WSL-resume incident, see
+            // SKIP_IF_BUSY_ESCALATE_AFTER_MS's doc comment) -- track how long
+            // this key has been OBSERVED continuously busy (gap-tolerant, see
+            // nextSkipIfBusyStreak) and stop trusting "next tick will catch
+            // it" once that streak crosses the threshold.
+            const streak = nextSkipIfBusyStreak(skipIfBusyStreaks.get(key), now)
+            skipIfBusyStreaks.set(key, streak)
+            if (decideSkipIfBusyEscalation(now - streak.startedAt) === 'skip-silently') {
+              logger.info({ task: task.name, agent: agentName }, 'Schedule busy, skipIfBusy=true: dropping tick silently')
+              appendTaskRun(task.name, agentName, 'skipped')
+              continue
+            }
+            logger.warn(
+              { task: task.name, agent: agentName, busyForMs: now - streak.startedAt },
+              'skipIfBusy task persistently busy past threshold -- escalating to the retry/alert pipeline instead of silently dropping again',
+            )
+            // Escalating now: clear the streak so a LATER, fresh busy episode
+            // (after this one eventually resolves) gets its own grace window
+            // rather than re-escalating on its very first tick.
+            skipIfBusyStreaks.delete(key)
+            insertPendingTaskRetryIfNew(task.name, agentName, now, 'busy')
             continue
           }
           // First encounter -- insert a new pending row. If somehow a
