@@ -134,6 +134,25 @@ export function idleFlushHandoffPrompt(tokens: number, idleMinutes: number, hand
 }
 
 /**
+ * Prep-nudge: the session has crossed prepPct (well below actPct) -- a
+ * ONE-TIME, explicitly non-urgent reminder to start maintaining HANDOFF.md
+ * WHILE STILL WORKING. Distinct wording from all three other prompts: this is
+ * the only one that must NOT tell the agent to stop -- there is no phase
+ * transition behind it, no deadline, nothing waiting for a reply. Telling an
+ * agent to "STOP" here would be false and would provoke exactly the panicked
+ * mid-task abandonment the other three prompts are careful to avoid too.
+ */
+export function prepHandoffNudgePrompt(pctRound: number, handoffPath: string): string {
+  return (
+    `[CONTEXT-GUARD] Tájékoztató, nem vészhelyzet: a munkakontextusod ~${pctRound}%-on van. ` +
+    `NE állj meg, folytasd a feladatot -- de mostantól tartsd karban a HANDOFF.md-t itt: ${handoffPath} ` +
+    `a /handoff skill struktúrája szerint (Goal / Current Progress / What Worked / What Didn't Work / Next Steps), ` +
+    `hogy amikor a rendszer később kritikus szintnél kéri a véglegesítést, az addigi munka már benne legyen. ` +
+    `Nincs más teendőd ebben a körben.`
+  )
+}
+
+/**
  * A handoff refresh request: the agent DID write a handoff, then kept working,
  * so the artifact no longer covers the session. Distinct wording from both
  * other requests -- "write a handoff" would read as a bug ("I already did"),
@@ -260,7 +279,11 @@ async function performRestart(name: string): Promise<void> {
   }
 }
 
-async function checkAgent(name: string, nowMs: number): Promise<void> {
+// Exported (mirrors context-restart-gate-runner.ts's identical rationale) so
+// the prep-nudge retry-on-failed-send behavior can be proven by calling the
+// SAME function the live sweep calls, not by reaching into the module-private
+// guardStates map.
+export async function checkAgent(name: string, nowMs: number): Promise<void> {
   const cfg = readContextGuardConfig(name)
   const state = guardStates.get(name) ?? INITIAL_GUARD_STATE
 
@@ -445,6 +468,20 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
           session,
           resumePrompt(name, handoffPathFor(name), hadHandoff, state.handoffStaleMinutes),
         )
+        break
+      }
+      case 'prep-handoff': {
+        // Unlike the other three actions, prepNudgeSent is committed here in
+        // the RUNNER, and ONLY on a confirmed 'sent' result -- decideGuard
+        // deliberately left it false in decision.nextState (already persisted
+        // by the guardStates.set() call above the switch). A silently-swallowed
+        // 'aborted-busy'/'skipped-locked' must NOT read as "nudge delivered":
+        // the flag stays false, and the very next sweep re-evaluates and
+        // retries, exactly the way an ordinary decideGuard 'none' would.
+        const result = await sendPromptToSession(session, prepHandoffNudgePrompt(pctRound ?? 0, handoffPathFor(name)))
+        if (result === 'sent') {
+          guardStates.set(name, { ...decision.nextState, prepNudgeSent: true })
+        }
         break
       }
     }

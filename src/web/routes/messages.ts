@@ -5,6 +5,7 @@ import {
   markMessageDone, markMessageFailed, getAgentMessage,
   closeOtelSpan,
   getPendingBacklogByAgent,
+  getWaitingOutboundMessages,
   COMPLETION_REPORT_PREFIX,
   type AgentMessage,
 } from '../../db.js'
@@ -185,6 +186,38 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
   // busy agent becomes visible BEFORE someone mistakes it for lost messages.
   if (path === '/api/messages/backlog' && method === 'GET') {
     json(res, getPendingBacklogByAgent())
+    return true
+  }
+
+  // SONWIN905 (2026-09-05, v3 plan section 5): the CONCRETE outbound messages
+  // `agent` dispatched whose ORIGINAL message has not reached done/failed --
+  // id/recipient/timestamp, not just a count. Codex review: this is NOT proof
+  // no reply ever came (a reply can arrive as a separate new message without
+  // the original ever being closed) -- an "open thread" signal, not a
+  // confirmed-still-waiting one; see getWaitingOutboundMessages's own doc
+  // comment for the full reasoning.
+  // Distinct on purpose from `?agent=` on the main GET below (that filters the
+  // agent's MAILBOX -- inbound via getPendingMessages, or both directions via
+  // getAgentConversation) and from /backlog above (INBOUND queue depth,
+  // getPendingBacklogByAgent) -- this one is OUTBOUND only, the question a
+  // resuming session needs answered for its handoff: "which of MY OWN
+  // dispatched requests are still open". Exists as an HTTP route (not just the
+  // db.ts helper) because the handoff skill only has curl/bash access, no
+  // direct DB access, same as every other data source it reads.
+  if (path === '/api/messages/waiting-outbound' && method === 'GET') {
+    const agent = (url.searchParams.get('agent') || '').trim()
+    if (!agent) {
+      json(res, { error: 'agent query parameter is required' }, 400)
+      return true
+    }
+    // Parsing only -- getWaitingOutboundMessages owns the default/clamp (see
+    // its doc comment). An earlier draft duplicated that logic here AND in
+    // the helper, and the two treated limit=0 vs. a negative limit
+    // inconsistently as a result. A missing/non-numeric `limit` is passed
+    // through as `undefined`/NaN and the helper's own bounds-checking applies.
+    const limitParam = url.searchParams.get('limit')
+    const limitRaw = limitParam !== null ? parseInt(limitParam, 10) : undefined
+    json(res, getWaitingOutboundMessages(agent, limitRaw))
     return true
   }
 

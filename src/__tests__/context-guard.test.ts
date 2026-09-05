@@ -4,6 +4,7 @@ import {
   contextLimitForModel,
   calibrateLimit,
   CALIBRATION_OVERSHOOT_TOLERANCE,
+  CONTROL_DENOMINATOR_1M,
   decideGuard,
   DEFAULT_CONTEXT_GUARD,
   handoffStaleMinutes,
@@ -65,24 +66,74 @@ describe('normalizeContextGuardConfig', () => {
     expect(normalizeContextGuardConfig({ limitTokens: 500 }).limitTokens).toBeNull()
     expect(normalizeContextGuardConfig({ limitTokens: 500_000 }).limitTokens).toBe(500_000)
   })
+
+  // SONWIN905 (2026-09-05): prepPct is nullable and MUST default to null, not
+  // to a guessed number -- a nonzero code-level default would silently arm the
+  // tier on every agent that already has the guard enabled (all 8 as of this
+  // writing), including ones whose calibration this feature was never meant to
+  // touch (e.g. usage-tracker's own lowered 0.7/0.85 actPct/hardPct).
+  describe('prepPct', () => {
+    it('defaults to null (off) for garbage, missing, and legacy configs', () => {
+      expect(DEFAULT_CONTEXT_GUARD.prepPct).toBeNull()
+      expect(normalizeContextGuardConfig(null).prepPct).toBeNull()
+      expect(normalizeContextGuardConfig({}).prepPct).toBeNull()
+      // Every agent in store/context-guard.json predates this field -- reading
+      // one of those existing entries must not arm a new tier out of nowhere.
+      expect(normalizeContextGuardConfig({ enabled: true, actPct: 0.9, hardPct: 0.97 }).prepPct).toBeNull()
+    })
+
+    it('rejects non-numbers, non-positive values, and anything at or above actPct', () => {
+      expect(normalizeContextGuardConfig({ prepPct: 'high' }).prepPct).toBeNull()
+      expect(normalizeContextGuardConfig({ prepPct: 0 }).prepPct).toBeNull()
+      expect(normalizeContextGuardConfig({ prepPct: -0.1 }).prepPct).toBeNull()
+      // prepPct > actPct would fire AFTER the wedge tier already claimed the
+      // decision (dead config, not merely undesirable) -- reject rather than
+      // silently accept a number that can never matter.
+      expect(normalizeContextGuardConfig({ actPct: 0.9, prepPct: 0.95 }).prepPct).toBeNull()
+      // prepPct === actPct is EQUALLY dead: decideGuard always runs the wedge
+      // tiers before the prep tier (see decideGuard's ordering), so once pct
+      // reaches actPct the wedge tier's handoffRequest already claims the
+      // decision -- the prep check is never even reached. Codex review
+      // (SONWIN905 v4, 2026-09-05): the field doc promises "strictly below
+      // actPct"; accepting the equal boundary as "valid" here contradicted
+      // that and produced a config that reads as configured but can never
+      // actually fire. Rejecting it (like the > case) instead of accepting it
+      // keeps "valid prepPct" and "can fire" the same statement.
+      expect(normalizeContextGuardConfig({ actPct: 0.9, prepPct: 0.9 }).prepPct).toBeNull()
+    })
+
+    it('accepts a valid value strictly below actPct', () => {
+      expect(normalizeContextGuardConfig({ actPct: 0.9, prepPct: 0.85 }).prepPct).toBe(0.85)
+      // Just under the boundary still counts; only the equal/above case is dead.
+      expect(normalizeContextGuardConfig({ actPct: 0.9, prepPct: 0.8999 }).prepPct).toBe(0.8999)
+    })
+  })
 })
 
 describe('contextLimitForModel / calibrateLimit', () => {
-  it('recognizes the 1M suffix and the measured 1M families, defaults 200k', () => {
-    expect(contextLimitForModel('claude-opus-4-8[1m]')).toBe(1_000_000)
-    // Host-measured 1M families (2026-07-27: fable-5 hit 976k, opus-4-8
+  it('recognizes the 1M suffix and the measured 1M-class families, defaults 200k', () => {
+    expect(contextLimitForModel('claude-opus-4-8[1m]')).toBe(CONTROL_DENOMINATOR_1M)
+    // Host-measured 1M-class families (2026-07-27: fable-5 hit 976k, opus-4-8
     // 985k-999k, opus-5 979k live) -- the blanket-200k guess restarted
-    // working agents at ~21% real usage.
-    expect(contextLimitForModel('claude-fable-5')).toBe(1_000_000)
-    expect(contextLimitForModel('fable-5')).toBe(1_000_000)
-    expect(contextLimitForModel('claude-mythos-5')).toBe(1_000_000)
-    expect(contextLimitForModel('claude-opus-4-8')).toBe(1_000_000)
-    expect(contextLimitForModel('claude-opus-4-6')).toBe(1_000_000)
-    expect(contextLimitForModel('claude-opus-5')).toBe(1_000_000)
-    expect(contextLimitForModel('claude-opus-5[1m]')).toBe(1_000_000)
-    // Sonnet stays 200k: never observed above 198k on this host. Haiku 200k
-    // by spec; unknown models stay conservative (calibration steps them up).
-    expect(contextLimitForModel('claude-sonnet-5')).toBe(200_000)
+    // working agents at ~21% real usage. All of these, PLUS sonnet-5 (added
+    // 2026-09-05, its own separate 967k live confirmation), now resolve to
+    // CONTROL_DENOMINATOR_1M rather than a literal 1_000_000 -- see that
+    // constant's doc comment for why the two must never drift apart again.
+    expect(contextLimitForModel('claude-fable-5')).toBe(CONTROL_DENOMINATOR_1M)
+    expect(contextLimitForModel('fable-5')).toBe(CONTROL_DENOMINATOR_1M)
+    expect(contextLimitForModel('claude-mythos-5')).toBe(CONTROL_DENOMINATOR_1M)
+    expect(contextLimitForModel('claude-opus-4-8')).toBe(CONTROL_DENOMINATOR_1M)
+    expect(contextLimitForModel('claude-opus-4-6')).toBe(CONTROL_DENOMINATOR_1M)
+    expect(contextLimitForModel('claude-opus-5')).toBe(CONTROL_DENOMINATOR_1M)
+    expect(contextLimitForModel('claude-opus-5[1m]')).toBe(CONTROL_DENOMINATOR_1M)
+    // Sonnet-5 EXACT match only (2026-09-05: own live /context readout, two
+    // independent sessions, "Auto-compact window: 967k tokens" -- see
+    // CONTROL_DENOMINATOR_1M's doc comment). Deliberately NOT a broader
+    // sonnet-* pattern: no evidence for other sonnet versions (e.g. 4-6).
+    expect(contextLimitForModel('claude-sonnet-5')).toBe(CONTROL_DENOMINATOR_1M)
+    expect(contextLimitForModel('claude-sonnet-4-6')).toBe(200_000)
+    // Haiku 200k by spec; unknown models stay conservative (calibration steps
+    // them up from live evidence rather than guessing high and going blind).
     expect(contextLimitForModel('claude-haiku-4-5')).toBe(200_000)
     expect(contextLimitForModel('claude-opus-4-5')).toBe(200_000)
     expect(contextLimitForModel('deepseek-v4-pro')).toBe(200_000)
@@ -96,8 +147,8 @@ describe('contextLimitForModel / calibrateLimit', () => {
   it('steps the limit up when the observation disproves the base', () => {
     expect(calibrateLimit(150_000, 200_000)).toBe(200_000)
     expect(calibrateLimit(489_000, 200_000)).toBe(500_000) // tars 2026-07-09
-    expect(calibrateLimit(900_000, 200_000)).toBe(1_000_000)
-    expect(calibrateLimit(300_000, 1_000_000)).toBe(1_000_000)
+    expect(calibrateLimit(900_000, 200_000)).toBe(CONTROL_DENOMINATOR_1M)
+    expect(calibrateLimit(300_000, CONTROL_DENOMINATOR_1M)).toBe(CONTROL_DENOMINATOR_1M)
   })
 
   // A full 200k window is OBSERVED slightly above 200k: the measured quantity is
@@ -133,9 +184,9 @@ describe('contextLimitForModel / calibrateLimit', () => {
     expect(calibrateLimit(489_000, 200_000)).toBe(500_000)
     expect(489_000 / calibrateLimit(489_000, 200_000)).toBeLessThanOrEqual(1)
     expect(calibrateLimit(300_000, 200_000)).toBe(500_000)
-    // A genuine 1M window at 85% must not be forced down onto 500k.
-    expect(calibrateLimit(850_000, 1_000_000)).toBe(1_000_000)
-    expect(calibrateLimit(850_000, 200_000)).toBe(1_000_000)
+    // A genuine 1M-class window at 85% must not be forced down onto 500k.
+    expect(calibrateLimit(850_000, CONTROL_DENOMINATOR_1M)).toBe(CONTROL_DENOMINATOR_1M)
+    expect(calibrateLimit(850_000, 200_000)).toBe(CONTROL_DENOMINATOR_1M)
   })
 
   it('pins the step-up boundary (documents the residual, does not hide it)', () => {
@@ -158,8 +209,8 @@ describe('contextLimitForModel / calibrateLimit', () => {
   it('leaves the top tier to report pct > 1 (no tier above to step to)', () => {
     // Above the largest known tier there is nothing to calibrate to, so the
     // overshoot must surface as pct > 1 and let hardPct fire.
-    expect(calibrateLimit(1_200_000, 1_000_000)).toBe(1_000_000)
-    expect(1_200_000 / calibrateLimit(1_200_000, 1_000_000)).toBeGreaterThan(1)
+    expect(calibrateLimit(1_200_000, CONTROL_DENOMINATOR_1M)).toBe(CONTROL_DENOMINATOR_1M)
+    expect(1_200_000 / calibrateLimit(1_200_000, CONTROL_DENOMINATOR_1M)).toBeGreaterThan(1)
   })
 })
 
@@ -193,7 +244,7 @@ describe('decideGuard: idle', () => {
 
   it('resets to initial state when fully disarmed (guard + net off)', () => {
     const disarmed = { ...CFG, enabled: false, saturationRestart: false }
-    const stale: GuardState = { phase: 'await-handoff', handoffMtimeAtRequest: 1, deadlineMs: 2, cooldownUntilMs: 0, saturatedStreak: 0, handoffStaleMinutes: null }
+    const stale: GuardState = { phase: 'await-handoff', handoffMtimeAtRequest: 1, deadlineMs: 2, cooldownUntilMs: 0, saturatedStreak: 0, handoffStaleMinutes: null, prepNudgeSent: false }
     const d = decideGuard(stale, inputs({ pct: 0.99, paneSaturated: true }), disarmed)
     expect(d.action).toBe('none')
     expect(d.nextState).toEqual(INITIAL_GUARD_STATE)
@@ -201,10 +252,122 @@ describe('decideGuard: idle', () => {
 
   it('stands down a stale await-handoff into cooldown when the guard is disabled mid-sequence', () => {
     const netOnly = { ...CFG, enabled: false }
-    const stale: GuardState = { phase: 'await-handoff', handoffMtimeAtRequest: 1, deadlineMs: 2, cooldownUntilMs: 0, saturatedStreak: 0, handoffStaleMinutes: null }
+    const stale: GuardState = { phase: 'await-handoff', handoffMtimeAtRequest: 1, deadlineMs: 2, cooldownUntilMs: 0, saturatedStreak: 0, handoffStaleMinutes: null, prepNudgeSent: false }
     const d = decideGuard(stale, inputs({ pct: 0.99 }), netOnly)
     expect(d.action).toBe('none')
     expect(d.nextState.phase).toBe('cooldown')
+  })
+})
+
+// SONWIN905 (2026-09-05): early-warning tier below actPct, added alongside the
+// contextLimitForModel fix for the same sonnet-5 misclassification. Nullable
+// and default-OFF (CFG here carries DEFAULT_CONTEXT_GUARD.prepPct === null),
+// so every test above this block already proves the feature is fully inert
+// unless an agent's config explicitly sets prepPct -- that is the point.
+describe('decideGuard: prep-nudge tier (SONWIN905)', () => {
+  const PREP_CFG: ContextGuardConfig = { ...CFG, prepPct: 0.85 }
+
+  it('does nothing when prepPct is not configured (null), even well into the band', () => {
+    const d = decideGuard(INITIAL_GUARD_STATE, inputs({ pct: 0.87 }), CFG)
+    expect(d.action).toBe('none')
+    expect(d.reason).not.toContain('prep')
+  })
+
+  it('fires a one-time prep-handoff action in the band, WITHOUT changing phase', () => {
+    const d = decideGuard(INITIAL_GUARD_STATE, inputs({ pct: 0.87 }), PREP_CFG)
+    expect(d.action).toBe('prep-handoff')
+    expect(d.nextState.phase).toBe('idle') // unlike request-handoff, no phase transition
+    // decideGuard itself must NOT mark the nudge as delivered -- only the
+    // runner does that, and only after a confirmed send.
+    expect(d.nextState.prepNudgeSent).toBe(false)
+  })
+
+  it('does not re-fire once the runner has confirmed delivery (prepNudgeSent true in state)', () => {
+    const alreadyNudged: GuardState = { ...INITIAL_GUARD_STATE, prepNudgeSent: true }
+    const d = decideGuard(alreadyNudged, inputs({ pct: 0.88 }), PREP_CFG)
+    expect(d.action).toBe('none')
+  })
+
+  it('re-arms once pct drops back below prepPct, so a later growth cycle gets its own nudge', () => {
+    const alreadyNudged: GuardState = { ...INITIAL_GUARD_STATE, prepNudgeSent: true }
+    const dropped = decideGuard(alreadyNudged, inputs({ pct: 0.5 }), PREP_CFG)
+    expect(dropped.action).toBe('none')
+    expect(dropped.nextState.prepNudgeSent).toBe(false)
+    // and the NEXT climb through the band fires again
+    const climbed = decideGuard(dropped.nextState, inputs({ pct: 0.87 }), PREP_CFG)
+    expect(climbed.action).toBe('prep-handoff')
+  })
+
+  it('the wedge tiers (actPct/hardPct) always win over the prep tier -- ordering guarantees no overlap', () => {
+    const atAct = decideGuard(INITIAL_GUARD_STATE, inputs({ pct: 0.91 }), PREP_CFG)
+    expect(atAct.action).toBe('request-handoff')
+    const atHard = decideGuard(INITIAL_GUARD_STATE, inputs({ pct: 0.98 }), PREP_CFG)
+    expect(atHard.action).toBe('restart')
+  })
+
+  it('the idle-flush tier wins over the prep tier when idle-flush ACTUALLY fires (more decisive action first)', () => {
+    const both: ContextGuardConfig = { ...PREP_CFG, idleFlushEnabled: true, idleFlushTokens: 400_000, idleMinutes: 20 }
+    const d = decideGuard(
+      INITIAL_GUARD_STATE,
+      inputs({ pct: 0.87, contextTokens: 600_000, idleMs: 21 * 60_000, paneIdle: true }),
+      both,
+    )
+    expect(d.action).toBe('request-handoff')
+    expect(d.reason).toContain('idle-flush')
+  })
+
+  // Codex review (SONWIN905 v5, 2026-09-05): decideIdleFlush returns a 'none'
+  // decision (via the shared none() helper) for every "not yet" case too --
+  // unmeasurable inputs, still quiet for less than idleMinutes, pane not
+  // confirmed idle -- not just for "does not apply here". The original v4
+  // code treated ANY truthy return from decideIdleFlush as a preempting
+  // decision, so idle-flush permanently blocked the prep tier below whenever
+  // idleFlushEnabled was on, even on ticks where idle-flush itself did
+  // nothing (Codex reproduced this directly: 87% context, busy/quiet-not-long-
+  // enough session -> idle-flush "not quiet enough yet" -> prep never runs).
+  // No fleet agent has idleFlushEnabled:true today, so this was latent, not
+  // yet a live incident -- fixed now so a future idle-flush rollout does not
+  // silently swallow the prep tier.
+  it('a "not yet" idle-flush status (heavy but not quiet long enough) does NOT block the prep tier (regression, SONWIN905 v5)', () => {
+    const both: ContextGuardConfig = { ...PREP_CFG, idleFlushEnabled: true, idleFlushTokens: 400_000, idleMinutes: 20 }
+    const d = decideGuard(
+      INITIAL_GUARD_STATE,
+      // Heavy enough for idle-flush's token threshold, but quiet for only 5m
+      // of the required 20m -- decideIdleFlush's own tests confirm this is a
+      // 'none' verdict, not "does not apply".
+      inputs({ pct: 0.87, contextTokens: 600_000, idleMs: 5 * 60_000, paneIdle: true }),
+      both,
+    )
+    expect(d.action).toBe('prep-handoff')
+  })
+
+  it('a "not yet" idle-flush status still surfaces its own specific reason when prep does not apply either (regression, SONWIN905 v5)', () => {
+    // Same "not yet" idle-flush shape as above, but prepPct is null (CFG, not
+    // PREP_CFG) -- the fallback must show idle-flush's specific diagnostic,
+    // not the generic "below threshold" that would otherwise mask WHY the
+    // session was heavy-but-untouched.
+    const idleFlushOnly: ContextGuardConfig = { ...CFG, idleFlushEnabled: true, idleFlushTokens: 400_000, idleMinutes: 20 }
+    const d = decideGuard(
+      INITIAL_GUARD_STATE,
+      inputs({ pct: 0.5, contextTokens: 600_000, idleMs: 5 * 60_000, paneIdle: true }),
+      idleFlushOnly,
+    )
+    expect(d.action).toBe('none')
+    expect(d.reason).toContain('idle-flush')
+    expect(d.reason).toContain('5m')
+  })
+
+  it('a degenerate prepPct === actPct DIRECTLY-CONSTRUCTED config never actually fires (wedge tier claims the decision first)', () => {
+    // normalizeContextGuardConfig now rejects prepPct === actPct at the source
+    // (see the 'prepPct' describe block above) -- this test constructs the
+    // config object directly, bypassing normalization, to confirm decideGuard's
+    // own tier ordering is a second, independent line of defense: even a
+    // hand-built degenerate config cannot make the prep tier fire once pct
+    // reaches actPct, because the wedge tier is always checked first.
+    const degenerate: ContextGuardConfig = { ...CFG, prepPct: CFG.actPct }
+    const d = decideGuard(INITIAL_GUARD_STATE, inputs({ pct: CFG.actPct }), degenerate)
+    expect(d.action).toBe('request-handoff') // the wedge tier's actPct check, not prep
+    expect(d.reason).toContain('act threshold')
   })
 })
 
@@ -255,7 +418,7 @@ describe('saturation net (samu 2026-07-18 stall)', () => {
       deadlineMs: NOW + 60_000,
       cooldownUntilMs: 0,
       saturatedStreak: 0,
-      handoffStaleMinutes: null,
+      handoffStaleMinutes: null, prepNudgeSent: false,
     }
     const d = decideGuard(awaiting, inputs({ paneSaturated: true, paneIdle: false }), CFG)
     expect(d.action).toBe('restart')
@@ -275,7 +438,7 @@ describe('saturation net (samu 2026-07-18 stall)', () => {
       deadlineMs: 0,
       cooldownUntilMs: NOW + 60_000,
       saturatedStreak: 0,
-      handoffStaleMinutes: null,
+      handoffStaleMinutes: null, prepNudgeSent: false,
     }
     const d = decideGuard(cooling, inputs({ paneSaturated: true }), netOnly)
     expect(d.action).toBe('none')
@@ -296,7 +459,7 @@ describe('decideGuard: await-handoff', () => {
     deadlineMs: NOW + 60_000,
     cooldownUntilMs: 0,
     saturatedStreak: 0,
-    handoffStaleMinutes: null,
+    handoffStaleMinutes: null, prepNudgeSent: false,
   }
 
   it('restarts once the handoff is written and the pane is idle', () => {
@@ -388,7 +551,7 @@ describe('stale handoff (GUARDSTALEHO817)', () => {
     deadlineMs: NOW + 5 * 60_000,
     cooldownUntilMs: 0,
     saturatedStreak: 0,
-    handoffStaleMinutes: null,
+    handoffStaleMinutes: null, prepNudgeSent: false,
   }
   // Handoff written 20 minutes ago (after the request), last transcript
   // activity 1 minute ago: 19 minutes of work the handoff does not cover.
@@ -485,7 +648,7 @@ describe('decideGuard: await-ready', () => {
     deadlineMs: NOW + 60_000,
     cooldownUntilMs: 0,
     saturatedStreak: 0,
-    handoffStaleMinutes: null,
+    handoffStaleMinutes: null, prepNudgeSent: false,
   }
 
   it('injects the resume prompt when the session is ready, then cools down', () => {
@@ -515,7 +678,7 @@ describe('decideGuard: cooldown', () => {
     deadlineMs: 0,
     cooldownUntilMs: NOW + 60_000,
     saturatedStreak: 0,
-    handoffStaleMinutes: null,
+    handoffStaleMinutes: null, prepNudgeSent: false,
   }
 
   it('suppresses everything during cooldown, even a huge pct', () => {
@@ -665,7 +828,7 @@ describe('decideGuard -- idle-flush tier', () => {
       deadlineMs: NOW + 60_000,
       cooldownUntilMs: 0,
       saturatedStreak: 0,
-      handoffStaleMinutes: null,
+      handoffStaleMinutes: null, prepNudgeSent: false,
     }
     const d = decideGuard(awaiting, inputs({ handoffMtime: NOW, paneIdle: true }), IDLE_CFG)
     expect(d.action).toBe('restart')

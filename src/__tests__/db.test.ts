@@ -23,6 +23,10 @@ import {
   clearPendingTaskRetryAlert,
   createAgentMessage,
   getDispatchedPendingStats,
+  getWaitingOutboundMessages,
+  markMessageDelivered,
+  markMessageDone,
+  markMessageFailed,
   COMPLETION_REPORT_PREFIX,
 } from '../db.js'
 import { DB_FILENAME } from '../config.js'
@@ -333,5 +337,86 @@ describe('getDispatchedPendingStats -- a lezaro visszajelzes nem dispatcholt mun
     expect(getDispatchedPendingStats('stat-a', NOW, CUTOFF).count)
       .toBe(getDispatchedPendingStats('stat-a', NOW, CUTOFF).count)
     expect(getDispatchedPendingStats('stat-c', NOW, CUTOFF).count).toBe(1)
+  })
+})
+
+// SONWIN905 (2026-09-05, v3 plan section 5): getDispatchedPendingStats/
+// hasOpenInboundQuestion only ever return a count/boolean -- the handoff
+// skill needs the CONCRETE id/recipient/timestamp of each open thread.
+describe('getWaitingOutboundMessages -- konkret varakozo szalak a handoff-hoz', () => {
+  it('visszaadja a sajat pending es delivered kimeno uzenetek id/cimzett/idopontjat', () => {
+    const sent = createAgentMessage('wait-a', 'wait-b', 'csinald meg Y-t')
+    markMessageDelivered(sent.id)
+    const waiting = getWaitingOutboundMessages('wait-a')
+    const match = waiting.find(w => w.id === sent.id)
+    expect(match).toBeDefined()
+    expect(match?.to_agent).toBe('wait-b')
+    expect(match?.created_at).toBe(sent.created_at)
+  })
+
+  it('kihagyja a lezart (done/failed) uzeneteket', () => {
+    const done = createAgentMessage('wait-c', 'wait-b', 'ez mar kesz lesz')
+    markMessageDone(done.id, 'ok')
+    const failed = createAgentMessage('wait-c', 'wait-b', 'ez el fog bukni')
+    markMessageFailed(failed.id, 'hiba')
+    const waiting = getWaitingOutboundMessages('wait-c')
+    expect(waiting.some(w => w.id === done.id)).toBe(false)
+    expect(waiting.some(w => w.id === failed.id)).toBe(false)
+  })
+
+  it('kihagyja a lezaro [Eredmény] visszajelzest, ugyanugy mint getDispatchedPendingStats', () => {
+    const real = createAgentMessage('wait-d', 'wait-b', 'valodi feladat')
+    createAgentMessage('wait-d', 'wait-b', `${COMPLETION_REPORT_PREFIX} msg_id:1 status:done\n\nkesz`)
+    const waiting = getWaitingOutboundMessages('wait-d')
+    expect(waiting.some(w => w.id === real.id)).toBe(true)
+    expect(waiting.every(w => w.id !== real.id + 1)).toBe(true)
+  })
+
+  it('csak a sajat kimeno uzeneteket adja vissza, nem a bejovoket', () => {
+    createAgentMessage('wait-f', 'wait-e', 'wait-f kuldi wait-e-nek')
+    const waiting = getWaitingOutboundMessages('wait-e')
+    expect(waiting.some(w => w.to_agent === 'wait-e')).toBe(false)
+  })
+
+  // Codex review (SONWIN905, 2026-09-05): a sajat CLAUDE.md Level-1 autonomia
+  // mintaja pontosan ezt hasznalja (bela -> bela [FELHÍVÁS] uzenet) fire-and-
+  // forget ertesitesnek -- ezek soha nem lesznek 'done', tehat e kizaras
+  // nelkul MINDEN ezt hasznalo agens orokre "varakozo szalkent" latna sajat
+  // magat.
+  it('kizarja az onmaganak kuldott (from_agent = to_agent) uzeneteket', () => {
+    const self = createAgentMessage('wait-self', 'wait-self', '[FELHÍVÁS] level1 note magamnak')
+    const waiting = getWaitingOutboundMessages('wait-self')
+    expect(waiting.some(w => w.id === self.id)).toBe(false)
+  })
+
+  it('legujabb elol, es tiszteletben tartja a limit parametert', () => {
+    const ids: number[] = []
+    for (let i = 0; i < 5; i++) {
+      ids.push(createAgentMessage('wait-g', 'wait-h', `uzenet ${i}`).id)
+    }
+    const waiting = getWaitingOutboundMessages('wait-g', 3)
+    expect(waiting).toHaveLength(3)
+    // legujabb elol: a legnagyobb id-k jonnek, csokkeno sorrendben
+    expect(waiting.map(w => w.id)).toEqual([...ids].reverse().slice(0, 3))
+  })
+
+  // Codex review (SONWIN905, 2026-09-05): a hatarertekek (0, negativ, >50)
+  // kezelese most a HELPERBEN dol el, nem a hivo route-ban -- ezek a tesztek
+  // a fuggvenyt kozvetlenul hivjak, hogy a hatar-logika a route-tol fuggetlenul
+  // is bizonyitott legyen.
+  it('nem-numerikus/0/negativ limit eseten az alapertelmezett 10-re esik vissza (nem 0-ra vagy 1-re)', () => {
+    for (let i = 0; i < 5; i++) {
+      createAgentMessage('wait-limit-edge', 'wait-h', `uzenet ${i}`)
+    }
+    expect(getWaitingOutboundMessages('wait-limit-edge', 0)).toHaveLength(5)
+    expect(getWaitingOutboundMessages('wait-limit-edge', -5)).toHaveLength(5)
+    expect(getWaitingOutboundMessages('wait-limit-edge', NaN)).toHaveLength(5)
+  })
+
+  it('50 fole clampeli a limitet', () => {
+    for (let i = 0; i < 55; i++) {
+      createAgentMessage('wait-limit-over', 'wait-h', `uzenet ${i}`)
+    }
+    expect(getWaitingOutboundMessages('wait-limit-over', 200)).toHaveLength(50)
   })
 })

@@ -2574,6 +2574,81 @@ export function hasOpenInboundQuestion(agentId: string): boolean {
   return !laterOut
 }
 
+// --- Handoff support helpers -------------------------------------------
+
+export interface WaitingOutboundMessage {
+  id: number
+  to_agent: string
+  created_at: number
+}
+
+/**
+ * SONWIN905 (2026-09-05, v3 plan section 5): the CONCRETE outbound messages
+ * fromAgent has NOT YET CLOSED to a terminal status (done/failed) -- id,
+ * recipient, timestamp, not just a count. getDispatchedPendingStats above
+ * answers "how many / is any of it stale" for the context-restart GATE; this
+ * answers "which ones, exactly" for the HANDOFF skill's "Inter-agent varakozo
+ * szalak" section, so a resumed session can name the specific open thread(s)
+ * instead of writing a vague "some replies are open" that a stale/wrong
+ * assumption could later hide behind. Read-only, no gating decision here.
+ *
+ * Codex review (SONWIN905, 2026-09-05): status pending/delivered proves only
+ * that the ORIGINAL dispatched message has not been closed done/failed -- it
+ * does NOT prove no reply ever came. A reply can arrive as a separate, NEW
+ * inter-agent message without the original dispatch ever being marked
+ * done/failed (nothing in this system requires the two to be linked). Treat
+ * this list as "still-open dispatched threads", never as "confirmed still
+ * awaiting a reply". This row shape carries NO content (id/to_agent/
+ * created_at only, see WaitingOutboundMessage below) -- a caller that needs
+ * to confirm whether a reply actually arrived must check its OWN
+ * conversation context or a separate message-history lookup, not this
+ * query's result, which cannot answer that question by itself.
+ *
+ * Excludes self-addressed messages (to_agent = from_agent). Codex review
+ * (SONWIN905, 2026-09-05): our own CLAUDE.md's Level-1 autonomy pattern has
+ * an agent message ITSELF (e.g. `bela -> bela [FELHÍVÁS] ...`) as a
+ * fire-and-forget notification -- nobody ever marks these 'done', so without
+ * this exclusion every agent using that pattern would show a permanent,
+ * unresolvable "waiting on myself" thread in its own handoff forever. This is
+ * a second deliberate refinement beyond the completion-report exclusion
+ * below, on the same "not hypothetical, already in production" grounds.
+ *
+ * Same completion-report exclusion as getDispatchedPendingStats, same reason
+ * (card 06f062e4, 2026-08-12): closing an inbound message auto-generates a
+ * `[Eredmény] msg_id:<n> status:<s>` acknowledgement back to the sender that
+ * nobody is expected to answer and that never reaches 'done' -- without this
+ * exclusion, every agent that has ever closed an inbound request would show a
+ * permanently "waiting" thread for its own acknowledgement receipt. This is a
+ * deliberate refinement of the v3 plan's literal query text (which did not
+ * include this filter): omitting it would reproduce the exact false-positive
+ * class getDispatchedPendingStats was built to fix, just surfaced in the
+ * handoff doc instead of the restart gate.
+ *
+ * Newest-first, capped at `limit` (default 10, matching the plan, max 50).
+ * The bound is enforced HERE, not left to callers, because an earlier draft
+ * left it entirely to the HTTP route below and that route's own clamp
+ * treated two different kinds of "invalid" inconsistently purely as a side
+ * effect of `0 || 10` being falsy in JS: a limit of exactly 0 fell back to
+ * the default (10), while a NEGATIVE limit instead clamped to a floor of 1 --
+ * two bugs-waiting-to-happen from one line of ad-hoc arithmetic. Any
+ * non-finite or non-positive `limit` (0, negative, NaN) collapses to the
+ * default here, the same treatment every invalid value gets, consistent with
+ * how this codebase's config normalizers treat invalid numeric input
+ * elsewhere (e.g. context-guard.ts's `pct()` helper) -- and this is now the
+ * ONLY place that decides it, so a future direct caller (not just the route)
+ * gets the same guarantee without having to know to clamp first.
+ */
+export function getWaitingOutboundMessages(fromAgent: string, limit = 10): WaitingOutboundMessage[] {
+  const cappedLimit = Number.isFinite(limit) && limit >= 1 ? Math.min(Math.floor(limit), 50) : 10
+  const ackPattern = `${COMPLETION_REPORT_PREFIX}%`
+  return db.prepare(
+    `SELECT id, to_agent, created_at FROM agent_messages
+       WHERE from_agent = ? AND to_agent != from_agent AND status IN ('pending','delivered')
+         AND content NOT LIKE ?
+       ORDER BY created_at DESC, id DESC LIMIT ?`,
+  ).all(fromAgent, ackPattern, cappedLimit) as WaitingOutboundMessage[]
+}
+
 // System/automation participants that are not real conversation peers. They are
 // excluded as THREAD rows in the dashboard sidebar (you don't chat with the
 // heartbeat or the coordinator), but messages involving them still count toward

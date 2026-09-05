@@ -158,10 +158,22 @@ describe('checkConfigPutFields', () => {
     // to ContextGuardConfig without a default, normalize() would still read it
     // while this check refused it -- pinned so that mismatch fails here.
     expect(guardFields).toEqual([
-      'enabled', 'saturationRestart', 'actPct', 'hardPct',
+      'enabled', 'saturationRestart', 'actPct', 'hardPct', 'prepPct',
       'limitTokens', 'cooldownMinutes', 'handoffTimeoutMinutes',
       'idleFlushEnabled', 'idleFlushTokens', 'idleMinutes',
     ])
+  })
+
+  // SONWIN905 (2026-09-05): prepPct is the newest field on this config, added
+  // the same way idleFlushEnabled/idleFlushTokens/idleMinutes were above --
+  // same regression class if it were forgotten (a PUT carrying it would look
+  // saved but never apply).
+  it('now ACCEPTS a payload carrying prepPct, and still refuses a near-miss of it', () => {
+    expect(checkConfigPutFields({ ...DEFAULT_CONTEXT_GUARD, prepPct: 0.85 }, guardFields).ok).toBe(true)
+    const r = checkConfigPutFields({ prepPtc: 0.85 }, guardFields)
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.rejected).toEqual(['prepPtc'])
   })
 })
 

@@ -63,6 +63,19 @@ curl -s -H "Authorization: Bearer $(cat store/.dashboard-token)" \
 DATE=$(date +%Y-%m-%d)
 curl -s -H "Authorization: Bearer $(cat store/.dashboard-token)" \
   "http://localhost:$PORT/api/daily-log?agent=$AGENT_ID&date=$DATE"
+
+# SONWIN905 (2026-09-05): up to the 10 most recent inter-agent threads THIS
+# agent dispatched that have NOT been closed done/failed yet -- id, recipient,
+# how long ago. This is NOT proof no reply ever came (a reply can arrive as a
+# separate new message without the original dispatch ever being closed) --
+# treat it as "still-open dispatched threads", not "confirmed no answer".
+# Feeds the "Inter-agent Waiting Threads" section below. Deliberately NOT the
+# same as /api/messages?agent=$AGENT_ID (that is the agent's whole MAILBOX,
+# both directions) or /api/messages/backlog (INBOUND queue depth) -- this is
+# OUTBOUND only, the specific question a resumed session needs answered:
+# "which of my own dispatched requests are still open".
+curl -s -H "Authorization: Bearer $(cat store/.dashboard-token)" \
+  "http://localhost:$PORT/api/messages/waiting-outbound?agent=$AGENT_ID&limit=10"
 ```
 
 Also include from your current conversation context:
@@ -73,7 +86,13 @@ Also include from your current conversation context:
 
 ### 2. Generate HANDOFF.md
 
-Structure with exactly these 5 sections:
+Structure with AT LEAST the following 7 sections, in this order. "At least"
+is deliberate, not a loophole: every section below is part of the baseline,
+not an optional extra -- a handoff that skips one because "nothing to report"
+should still include it and say so explicitly (see Pitfalls). Add MORE
+sections only when the specific task genuinely needs them (e.g. a large
+migration might warrant its own "Rollback Plan" section) -- do not silently
+drop any of the 7.
 
 ```markdown
 # Handoff: {purpose}
@@ -110,6 +129,53 @@ To: {target agent or "next session"}
 2. Second thing
 3. ...
 Keep each step concrete enough to execute without asking questions.}
+
+## Open Questions
+{SONWIN905 (2026-09-05): two DIFFERENTLY-SHAPED kinds of "not decided yet" --
+conflating them is the most common way a resumed session re-opens something
+that was already in motion, or conversely sits idle on something nobody else
+is actually working on. Keep them as two separate lists, even when one is empty:
+
+- **Dispatched, not yet closed**: a question or task sent to someone else
+  (another agent, the user) that has not been resolved yet. Name WHO it went
+  to and roughly WHEN. "Not yet closed" is not the same claim as "definitely
+  no reply came" -- a reply can arrive as a separate message without the
+  original dispatch ever being marked resolved, so check the actual
+  conversation before writing this up as unanswered. The Inter-agent Waiting
+  Threads section below only lists the latest `limit` (10) rows, not every
+  open dispatch ever sent -- if an inter-agent item here appears among those
+  returned rows, cross-reference it below ("see thread #1234 below") instead
+  of describing the same open item twice with no link between the two; if it
+  does not appear there (older than the last 10), it still belongs here.
+- **Left open for myself**: a decision THIS session deliberately did not
+  make -- needs more information, needs the user's judgment call, or was cut
+  short by context/time running out. Nobody else is going to resolve this;
+  the next session (or the user) has to.
+
+State "none" explicitly for either list if empty -- an omitted list reads as
+"nobody checked", not as "there were none".}
+
+## Inter-agent Waiting Threads
+{SONWIN905 (2026-09-05): the up-to-10 most recent NOT-YET-CLOSED outbound
+threads from the `waiting-outbound` query in step 1 -- concrete, not vague,
+but also not exhaustive (only the most recent `limit` rows; say so if the
+kanban/memory context suggests there may be more open than that). For each
+row, report ONLY what the API actually returns -- the message id, who it was
+sent to, and how long ago (compute from `created_at`, a Unix-epoch-seconds
+field, against the current time) -- do NOT invent detail the response does
+not contain (e.g. what the thread is about or what it is "awaiting", unless
+you actually know that from your own conversation context, in which case say
+so as your own addition, not as something the query told you). Example line:
+"msg id 1481 -> bela, sent ~40m ago (not yet closed)." A not-yet-closed
+status is NOT proof no reply came -- a reply can arrive as a separate message
+without the original ever being closed, so do not phrase this list as
+"confirmed unanswered". If a thread here is also listed under Open Questions'
+"dispatched, not yet closed", cross-reference it there rather than letting
+the two drift into inconsistent descriptions of the same open item.
+
+State "none" explicitly if the query returned nothing -- same reasoning as
+Open Questions: an omitted section is indistinguishable from a section nobody
+generated.}
 ```
 
 ### 3. Deliver
@@ -129,16 +195,26 @@ curl -s -X POST http://localhost:$PORT/api/messages \
 
 Report to the user/caller:
 - Where the handoff was written (file path or inter-agent message ID)
-- Summary: how many kanban cards, memories, and log entries were included
+- Summary: how many kanban cards, memories, log entries, open questions, and
+  waiting threads were included
 - The `purpose` line for quick reference
 
 ## Pitfalls
 
 - Do NOT include secrets, tokens, or .env values in the handoff
 - Do NOT include full file contents -- use paths and line numbers
-- Keep it under 3000 words -- the receiving session needs room to work
+- Keep it under 3000 words -- the receiving session needs room to work. This
+  limit is unchanged by the Open Questions / Inter-agent Waiting Threads
+  sections: they are lists of short facts (who/what/when), not narrative, so
+  they should not meaningfully compete with the word budget the other
+  sections need.
 - If `target=` agent is not running (check tmux), warn and fall back to file mode
 - The handoff is a snapshot -- it goes stale. Include the timestamp prominently
+- Do NOT omit Open Questions or Inter-agent Waiting Threads because they are
+  empty -- write "none" explicitly. An omitted section and an empty one look
+  identical to the next session, but mean opposite things ("nobody checked"
+  vs "checked, there were none") -- the whole point of naming them as their
+  own baseline sections is so a resumed session never has to guess which.
 
 ## Relation to other persistence mechanisms
 
@@ -150,5 +226,6 @@ Report to the user/caller:
 | warm memory | Stable project context | Source: includes relevant warm context |
 | kanban | Task tracking | Source: includes assigned/active cards |
 | daily log | Chronological record | Source: includes today's log entries |
+| inter-agent messages | Cross-agent delegation queue | Source: `waiting-outbound` query feeds Inter-agent Waiting Threads |
 
 The handoff READS from these systems but does not REPLACE them. After a handoff, the receiving session should still check the live state of kanban/memory -- the handoff is a starting-context accelerator, not the source of truth.

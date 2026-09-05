@@ -39,6 +39,16 @@ export interface ContextGuardConfig {
   /** Context fraction at which we stop waiting for anything and force a fresh
    *  restart -- a pane this deep is likely already wedged. */
   hardPct: number
+  /** Early-warning fraction, strictly below actPct: send a ONE-TIME, non-urgent
+   *  nudge asking the agent to start maintaining HANDOFF.md as it works, WITHOUT
+   *  stopping. Nullable and default-OFF (unlike actPct/hardPct, which always
+   *  have a numeric default) -- adding a nonzero code-level default would
+   *  silently turn this tier on for every agent that already has the guard
+   *  `enabled`, including ones whose calibration this feature was never meant
+   *  to touch (e.g. usage-tracker's own lowered 0.7/0.85 actPct/hardPct, where
+   *  a generic 0.85 prepPct would sit at or past its own hardPct). Only
+   *  meaningful once explicitly set per agent in the config store. */
+  prepPct: number | null
   /** Explicit context-window override (tokens); null = infer from model. */
   limitTokens: number | null
   /** Quiet period after a guard cycle. Also absorbs the window right after a
@@ -64,6 +74,9 @@ export const DEFAULT_CONTEXT_GUARD: ContextGuardConfig = {
   saturationRestart: true,
   actPct: 0.90,
   hardPct: 0.97,
+  // null (off) by default -- see the field doc on ContextGuardConfig.prepPct
+  // for why this must never gain a nonzero code-level default.
+  prepPct: null,
   limitTokens: null,
   cooldownMinutes: 15,
   // 20 minutes, raised from 6 (2026-07-27): a working agent mid-turn cannot
@@ -118,6 +131,23 @@ export function normalizeContextGuardConfig(raw: unknown): ContextGuardConfig {
   let actPct = pct(o.actPct, DEFAULT_CONTEXT_GUARD.actPct)
   let hardPct = pct(o.hardPct, DEFAULT_CONTEXT_GUARD.hardPct)
   if (hardPct < actPct) hardPct = actPct // hard tier can never sit below act
+  // Nullable, NO numeric fallback: an absent/invalid value means "this tier is
+  // off for this agent", not "use the default 0.85" -- see the field doc.
+  // Must sit STRICTLY within (0, actPct); anything else (missing, non-number,
+  // <= 0, >= actPct) collapses to null rather than to a guessed number.
+  // Codex review (SONWIN905 v4, 2026-09-05): prepPct === actPct was
+  // previously accepted as "valid" via <=, but decideGuard always runs the
+  // wedge tiers (hardPct/actPct) before the prep tier -- once pct reaches
+  // actPct the wedge tier's handoffRequest already claims the decision, so a
+  // prepPct equal to actPct can NEVER actually fire. The field doc promises
+  // "strictly below actPct"; accepting the equal case as valid input silently
+  // contradicts that and produces a config that reads as configured but is
+  // permanently a no-op. Treat it the same as any other value that could
+  // never trigger: normalize to null (tier off) instead of accepting it.
+  const prepPct =
+    (typeof o.prepPct === 'number' && Number.isFinite(o.prepPct) && o.prepPct > 0 && o.prepPct < actPct)
+      ? o.prepPct
+      : null
   let limitTokens: number | null = null
   if (typeof o.limitTokens === 'number' && Number.isFinite(o.limitTokens) && o.limitTokens >= 10_000) {
     limitTokens = Math.floor(o.limitTokens)
@@ -133,6 +163,7 @@ export function normalizeContextGuardConfig(raw: unknown): ContextGuardConfig {
     saturationRestart: o.saturationRestart !== false, // default-ON: only an explicit false disarms the net
     actPct,
     hardPct,
+    prepPct,
     limitTokens,
     cooldownMinutes: mins(o.cooldownMinutes, DEFAULT_CONTEXT_GUARD.cooldownMinutes),
     handoffTimeoutMinutes: mins(o.handoffTimeoutMinutes, DEFAULT_CONTEXT_GUARD.handoffTimeoutMinutes),
@@ -142,40 +173,90 @@ export function normalizeContextGuardConfig(raw: unknown): ContextGuardConfig {
   }
 }
 
+/**
+ * The calibration denominator used for guard math against the 1M-class
+ * families: the safe ceiling before Claude Code's own, uncontrolled
+ * auto-compact fires -- not the nominal/marketing window size. OBSERVED AND
+ * VERIFIED DIRECTLY FOR SONNET-5 ONLY (see the live /context measurement
+ * below); for the other 1M-family models (fable/mythos/opus) this number is
+ * EXTRAPOLATED, not independently confirmed -- see the "TEMPORARY, UNVERIFIED
+ * EXTRAPOLATION" paragraph further down for exactly what that does and does
+ * not mean. Declared once
+ * and reused everywhere a "1M-family" number is needed (contextLimitForModel's
+ * two 1M-returning branches AND the CONTEXT_LIMIT_TIERS step-up target below),
+ * so the two can never drift apart the way they did in an earlier draft of
+ * this fix (a change to CONTEXT_LIMIT_TIERS alone silently did nothing,
+ * because contextLimitForModel's [1m]/ONE_MILLION_FAMILIES branches returned
+ * a separate hardcoded 1_000_000 that never consulted the tiers array).
+ *
+ * Measured DIRECTLY for claude-sonnet-5 only: the model's own live /context
+ * readout ("Auto-compact window: 967k tokens", i.e. the 1_000_000 nominal
+ * window minus a ~33k reserved compaction buffer), cross-checked on two
+ * independent, currently-running sonnet-5 sessions (2026-09-05). For the
+ * OTHER 1M-family models (fable/mythos/opus) this value is a TEMPORARY,
+ * UNVERIFIED EXTRAPOLATION, not a confirmed number for those families -- their
+ * own historical peak observations (see below, 976k/911k/985k-999k/979k) are a
+ * DIFFERENT KIND of measurement (a successful session's high-water mark, not a
+ * declared trigger point) and neither confirm nor contradict this figure; the
+ * opus-4-8 985k-999k range in particular sits PARTLY ABOVE it. Re-verify per
+ * family via that family's own live /context output once such an agent is
+ * next running, and give it its own entry here if the number differs.
+ *
+ * Applying this figure fleet-wide (instead of only to sonnet-5) is a RELATIVE
+ * improvement over today's production behavior, not a proof of absolute
+ * safety: today every 1M-family agent's hard-restart threshold is
+ * 0.97 * 1_000_000 = 970_000, which sits above 967_000 -- but 967_000 itself
+ * is a value VERIFIED ONLY FOR SONNET-5, applied to the other families as an
+ * unconfirmed shared denominator, not a measured per-family ceiling. So this
+ * is not "970_000 is confirmed above every family's true ceiling"; it is
+ * "970_000 is above the one number we are choosing to share across families",
+ * and a family whose real ceiling is lower than that shared number could
+ * still have its own uncontrolled auto-compact fire before our external
+ * mechanism gets a turn. Moving the denominator down to 967_000 can only move
+ * the external threshold EARLIER (938_000), never later -- if some family's
+ * true ceiling turns out to be below 938_000, the external restart is still
+ * late, just LESS late than the 970_000 it fires at today. This is not a
+ * guarantee, only a bound improvement pending real per-family measurement.
+ */
+export const CONTROL_DENOMINATOR_1M = 967_000
+
 // Known context-window tiers. We cannot hardcode every model's window (and new
 // models ship), so contextLimitForModel gives a base and calibrateLimit steps
 // it up when the OBSERVED context proves the base wrong.
-export const CONTEXT_LIMIT_TIERS = [200_000, 500_000, 1_000_000] as const
+export const CONTEXT_LIMIT_TIERS = [200_000, 500_000, CONTROL_DENOMINATOR_1M] as const
 
 /**
  * Base context window inferred from the model id.
  *
  * The `[1m]` suffix is an explicit operator opt-in and always wins. Beyond
- * that, the current Fable/Mythos/Opus families run 1M windows in Claude Code
- * WITHOUT the suffix -- verified from live sources, not assumed: the Models
- * API reports 1M for all of them, and this host's own transcripts show
- * sessions genuinely reaching it (measured 2026-07-27: fable-5 976k, geri
- * fable-5 911k, opus-4-8 985k-999k, opus-5 979k). The previous blanket-200k
- * guess made the guard read a fable-5 session at 21% real usage as "106%
- * full" and force-restart working agents all day (17 hard-threshold events
- * on 2026-07-27, two of them killing samu mid-task and losing dispatched
- * instructions).
+ * that, the current Fable/Mythos/Opus/Sonnet-5 families run ~1M-class windows
+ * in Claude Code WITHOUT the suffix -- verified from live sources, not
+ * assumed: the Models API reports 1M for all of them, and this host's own
+ * transcripts show sessions genuinely reaching it (measured 2026-07-27:
+ * fable-5 976k, geri fable-5 911k, opus-4-8 985k-999k, opus-5 979k; sonnet-5
+ * confirmed separately on 2026-09-05, see CONTROL_DENOMINATOR_1M above). The
+ * previous blanket-200k guess made the guard read a fable-5 session at 21%
+ * real usage as "106% full" and force-restart working agents all day (17
+ * hard-threshold events on 2026-07-27, two of them killing samu mid-task and
+ * losing dispatched instructions) -- sonnet-5 carried the SAME blanket-200k
+ * bug undetected until 2026-09-05 (two live sessions there had already
+ * reached 449,925 and 484,948 observed tokens, both well past a real 200k
+ * window, self-masked by calibrateLimit's own step-up-only correction).
  *
- * Sonnet stays at 200k deliberately: this host has never observed a sonnet
- * session above 198k (sonnet-5 max 197,885 across 14 days), so 200k is the
- * evidenced effective window there. Haiku is 200k by spec. Unknown models
- * stay conservative at 200k -- calibrateLimit and the runner's persisted
- * high-water mark step the denominator up from live evidence, and
- * over-estimating would blind the proactive tiers (the 2026-07-26 failure
- * mode), while under-estimating is loud and self-correcting.
+ * Haiku is 200k by spec (kept out of ONE_MILLION_FAMILIES deliberately -- no
+ * evidence it shares the larger window). Unknown models stay conservative at
+ * 200k -- calibrateLimit and the runner's persisted high-water mark step the
+ * denominator up from live evidence, and over-estimating would blind the
+ * proactive tiers (the 2026-07-26 failure mode), while under-estimating is
+ * loud and self-correcting.
  */
-const ONE_MILLION_FAMILIES = [/fable-\d/, /mythos-\d/, /opus-4-[6-9]/, /opus-[5-9]\b/]
+const ONE_MILLION_FAMILIES = [/fable-\d/, /mythos-\d/, /opus-4-[6-9]/, /opus-[5-9]\b/, /^claude-sonnet-5$/]
 
 export function contextLimitForModel(model: string | null | undefined): number {
   if (typeof model !== 'string') return 200_000
   const m = model.toLowerCase()
-  if (m.includes('[1m]')) return 1_000_000
-  if (ONE_MILLION_FAMILIES.some(rx => rx.test(m))) return 1_000_000
+  if (m.includes('[1m]')) return CONTROL_DENOMINATOR_1M
+  if (ONE_MILLION_FAMILIES.some(rx => rx.test(m))) return CONTROL_DENOMINATOR_1M
   return 200_000
 }
 
@@ -215,9 +296,12 @@ export const CALIBRATION_OVERSHOOT_TOLERANCE = 1.25
  * did not guess is measured against the smaller tier until it exceeds it by the
  * tolerance -- e.g. a genuine 500k window observed in 200000..250000 reads as
  * over-full and may be restarted once before it grows past the step-up point.
- * No model in the fleet is configured that way today (every agent resolves to a
- * 200k window; only the `[1m]` suffix selects a larger one), and `limitTokens`
- * pins the denominator explicitly when an operator knows better.
+ * No model in the fleet is configured that way today: every agent either
+ * resolves straight to a 1M-class window via contextLimitForModel (the `[1m]`
+ * suffix, OR membership in ONE_MILLION_FAMILIES -- fable/mythos/opus/sonnet-5
+ * as of 2026-09-05, not the suffix alone anymore) or resolves to 200k, with
+ * nothing currently landing in the unguessed-500k gap this residual describes.
+ * `limitTokens` pins the denominator explicitly when an operator knows better.
  */
 export function calibrateLimit(observedTokens: number, baseLimit: number): number {
   const explains = (limit: number): boolean =>
@@ -249,6 +333,16 @@ export interface GuardState {
    *  questions (2026-08-17: a merge-gate verdict on a payment PR was missing
    *  from a 20-minute-old handoff presented as current). */
   handoffStaleMinutes: HandoffStaleness
+  /** True once the one-time prepPct nudge has been SUCCESSFULLY delivered for
+   *  the current growth cycle. Reset to false as soon as pct drops back below
+   *  prepPct (via /clear, a restart, or any other context shrink), so a LATER
+   *  growth cycle through the same band gets its own nudge -- without this
+   *  reset a single lifetime "already sent" flag would silently go stale after
+   *  the very first cycle. Set only on a CONFIRMED delivery (sendPromptToSession
+   *  returning 'sent'), never merely on "did not throw", so a swallowed
+   *  aborted-busy/skipped-locked result gets retried on the next sweep instead
+   *  of being silently recorded as done. */
+  prepNudgeSent: boolean
 }
 
 export const INITIAL_GUARD_STATE: GuardState = {
@@ -258,6 +352,7 @@ export const INITIAL_GUARD_STATE: GuardState = {
   cooldownUntilMs: 0,
   saturatedStreak: 0,
   handoffStaleMinutes: null,
+  prepNudgeSent: false,
 }
 
 /** Idle-phase sweeps that must agree the pane is saturated before the net
@@ -354,7 +449,15 @@ export function handoffStaleMinutes(inputs: GuardInputs): HandoffStaleness {
   return gapMs > STALE_HANDOFF_SLACK_MS ? Math.round(gapMs / 60_000) : null
 }
 
-export type GuardActionType = 'none' | 'request-handoff' | 'restart' | 'inject-resume'
+// 'prep-handoff' is DELIBERATELY separate from 'request-handoff', not a reason
+// -prefixed variant of it (the way idle-flush/stale-refresh share the
+// request-handoff tag): every existing request-handoff decision unconditionally
+// transitions to 'await-handoff' (see handoffRequest() below), and callers may
+// reasonably rely on that pairing. prep-handoff intentionally stays in 'idle'
+// (it is a one-time nudge to start maintaining a handoff, not a stop-and-wait
+// request) -- reusing 'request-handoff' for that would quietly break the
+// existing tag's implicit contract instead of extending it.
+export type GuardActionType = 'none' | 'request-handoff' | 'restart' | 'inject-resume' | 'prep-handoff'
 
 export interface GuardDecision {
   action: GuardActionType
@@ -378,6 +481,7 @@ function cooldown(nowMs: number, cfg: ContextGuardConfig, reason: string): Guard
       cooldownUntilMs: nowMs + cfg.cooldownMinutes * 60_000,
       saturatedStreak: 0,
       handoffStaleMinutes: null,
+      prepNudgeSent: false,
     },
   }
 }
@@ -395,6 +499,7 @@ function restartDecision(nowMs: number, reason: string, staleMinutes: HandoffSta
       cooldownUntilMs: 0,
       saturatedStreak: 0,
       handoffStaleMinutes: staleMinutes,
+      prepNudgeSent: false,
     },
   }
 }
@@ -448,10 +553,39 @@ export function decideGuard(
       // paying for", and a session that is both should be rescued on the
       // urgent grounds, not the thrifty ones. In practice it only ever sees
       // sessions below actPct, which is exactly the band it is for.
+      //
+      // decideIdleFlush returns a 'none' decision (via the shared `none()`
+      // helper) for every "not yet" case too -- unmeasurable inputs, still
+      // quiet for less than idleMinutes, pane not confirmed idle -- not just
+      // for "does not apply here". Codex review (SONWIN905 v4, 2026-09-05):
+      // treating any truthy return as a preempting decision meant idle-flush
+      // permanently blocked the prep tier below whenever idleFlushEnabled was
+      // on, even on ticks where idle-flush itself did nothing. Only an ACTUAL
+      // idle-flush action (currently always 'request-handoff' from the
+      // handoffRequest() call at the end of decideIdleFlush) may preempt prep;
+      // a 'none' from idle-flush is deferred so prep gets a turn, and is only
+      // surfaced afterwards if prep does not fire either -- this keeps its
+      // more specific reason text over the generic "below threshold" below.
+      let idleFlushDeferred: GuardDecision | null = null
       if (cfg.idleFlushEnabled) {
         const flush = decideIdleFlush(nowMs, inputs, cfg, cleared, none)
-        if (flush) return flush
+        if (flush) {
+          if (flush.action !== 'none') return flush
+          idleFlushDeferred = flush
+        }
       }
+      // Prep-nudge tier. Ranked below idle-flush's actual actions deliberately,
+      // same reasoning as idle-flush vs. the wedge tiers: idle-flush's full
+      // handoff+eventual restart is a more decisive action than prep's
+      // one-time reminder, so a session that qualifies for both is served by
+      // the more decisive one. Only reached once decideWedgeTiers has already
+      // returned null, i.e. pct < actPct is guaranteed here -- the prep band
+      // can never overlap the wedge tiers by construction of this ordering.
+      if (cfg.enabled && inputs.pct !== null && cfg.prepPct !== null) {
+        const prep = decidePrepNudge(inputs, cfg, cleared, none)
+        if (prep) return prep
+      }
+      if (idleFlushDeferred) return idleFlushDeferred
       if (!cfg.enabled) return none('proactive guard disabled (saturation net armed)', cleared)
       if (inputs.pct === null) return none('context unmeasurable', cleared)
       return none('below threshold', cleared)
@@ -533,6 +667,7 @@ export function decideGuard(
             cooldownUntilMs: nowMs + cfg.cooldownMinutes * 60_000,
             saturatedStreak: 0,
             handoffStaleMinutes: null,
+            prepNudgeSent: false,
           },
         }
       }
@@ -657,6 +792,48 @@ function handoffRequest(
       cooldownUntilMs: 0,
       saturatedStreak: 0,
       handoffStaleMinutes: null,
+      prepNudgeSent: false,
     },
+  }
+}
+
+/**
+ * Prep-nudge tier: pct has crossed prepPct but not yet actPct. Sends a
+ * ONE-TIME, non-urgent reminder to start maintaining HANDOFF.md while still
+ * working -- unlike handoffRequest() this does NOT transition the phase (the
+ * agent is not asked to stop, so there is nothing to wait for and no deadline
+ * to track). Null = does not apply this tick.
+ *
+ * The "already sent" flag is reset the moment pct drops back below prepPct
+ * (regardless of why -- /clear, restart, or plain context shrink), so a LATER
+ * growth cycle through the same band gets its own fresh nudge; without this a
+ * one-shot lifetime flag would silently go stale after the session's first
+ * climb.
+ *
+ * The actual `prepNudgeSent: true` commit happens in the RUNNER, only on a
+ * CONFIRMED delivery (sendPromptToSession returning 'sent') -- this function
+ * deliberately leaves it unchanged (still false) in the returned nextState, so
+ * a send that silently fails (aborted-busy/skipped-locked, or a thrown error)
+ * is retried on the very next sweep instead of being recorded as done.
+ */
+function decidePrepNudge(
+  inputs: GuardInputs,
+  cfg: ContextGuardConfig,
+  cleared: GuardState,
+  none: NoneFn,
+): GuardDecision | null {
+  const pct = inputs.pct as number
+  const prepPct = cfg.prepPct as number
+  if (pct < prepPct) {
+    if (cleared.prepNudgeSent) {
+      return none('below prep threshold -- re-arming prep nudge for the next growth cycle', { ...cleared, prepNudgeSent: false })
+    }
+    return null
+  }
+  if (cleared.prepNudgeSent) return null // already nudged this cycle; wait for actPct or a drop below prepPct
+  return {
+    action: 'prep-handoff',
+    reason: `prep threshold (${Math.round(pct * 100)}% >= ${Math.round(prepPct * 100)}%) -- one-time early nudge, no phase change`,
+    nextState: cleared, // prepNudgeSent stays false here -- see doc comment above
   }
 }
