@@ -1,0 +1,12 @@
+{
+  "schedule": "0 4 * * *",
+  "agent": "{{MAIN_AGENT_ID}}",
+  "enabled": false,
+  "type": "command",
+  "description": "Titkosított teljes napi mentés (kanban e5c6ce03). Opt-in: ALAPÉRTELMEZETTEN KIKAPCSOLVA. Feltétele: BACKUP_PASSPHRASE_FILE (alapból ~/.marveen-backup-passphrase, 0600, egy sor) és BACKUP_DEST_ROOT (Drive-szinkronizált célmappa) helyesen beállítva, valamint gpg telepítve -- ezeket Istvan hagyja jóvá és állítja be kézzel, mielőtt bekapcsolja. Első futtatás előtt kézi, felügyelt próbát kér a fejlesztési folyamat.",
+  "command": "cd '{{INSTALL_DIR}}' && bash '{{INSTALL_DIR}}/scripts/backup.sh'",
+  "timeoutMs": 120000,
+  "failThreshold": 1,
+  "catchUpMaxAgeMinutes": -1,
+  "createdAt": 0
+}

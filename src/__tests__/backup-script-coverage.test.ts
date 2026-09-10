@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, cpSync, chmodSync, statSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, cpSync, chmodSync, statSync, readdirSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
+import Database from 'better-sqlite3'
 
 // BACKUP904 (2026-09-08): scripts/backup.sh's store/ coverage was a 5-name
 // whitelist (only claudeclaw.db+wal/shm, .dashboard-token, config-overrides)
@@ -28,14 +29,28 @@ import { spawnSync } from 'node:child_process'
 // fails here.
 const REPO_ROOT = join(__dirname, '..', '..')
 const REAL_BACKUP_SCRIPT = join(REPO_ROOT, 'scripts', 'backup.sh')
+const REAL_SQLITE_HELPER = join(REPO_ROOT, 'scripts', 'backup-sqlite.mjs')
 
 let SANDBOX = ''
 let FAKE_REPO = ''
 let FAKE_HOME = ''
+let PASSPHRASE_FILE = ''
+let DEST_ROOT = ''
 
+// 2026-09-10 (kanban e5c6ce03): backup.sh now hard-requires a validated
+// passphrase file and an existing BACKUP_DEST_ROOT before it does ANY work
+// (encryption is not optional -- it is the whole point of this script). A
+// throwaway, sandbox-local passphrase is enough for these coverage tests;
+// none of them assert anything about the encrypted output itself (that is
+// backup-encryption.test.ts's job).
 function runBackup(): ReturnType<typeof spawnSync> {
   return spawnSync('bash', [join(FAKE_REPO, 'scripts', 'backup.sh')], {
-    env: { ...process.env, HOME: FAKE_HOME },
+    env: {
+      ...process.env,
+      HOME: FAKE_HOME,
+      BACKUP_PASSPHRASE_FILE: PASSPHRASE_FILE,
+      BACKUP_DEST_ROOT: DEST_ROOT,
+    },
     encoding: 'utf-8',
   })
 }
@@ -64,6 +79,18 @@ beforeEach(() => {
   mkdirSync(FAKE_HOME, { recursive: true })
   cpSync(REAL_BACKUP_SCRIPT, join(FAKE_REPO, 'scripts', 'backup.sh'))
   chmodSync(join(FAKE_REPO, 'scripts', 'backup.sh'), 0o755)
+  cpSync(REAL_SQLITE_HELPER, join(FAKE_REPO, 'scripts', 'backup-sqlite.mjs'))
+  // backup-sqlite.mjs resolves better-sqlite3 from ITS OWN repo's
+  // node_modules (../node_modules relative to the script) -- symlink the
+  // real one in, same trick used for every isolated test worktree in this
+  // project (README/CLAUDE.md testing sections).
+  symlinkSync(join(REPO_ROOT, 'node_modules'), join(FAKE_REPO, 'node_modules'))
+
+  PASSPHRASE_FILE = join(SANDBOX, 'passphrase')
+  writeFileSync(PASSPHRASE_FILE, 'sandbox-throwaway-test-passphrase-not-real\n')
+  chmodSync(PASSPHRASE_FILE, 0o600)
+  DEST_ROOT = join(SANDBOX, 'destination')
+  mkdirSync(DEST_ROOT, { recursive: true })
 })
 afterEach(() => { rmSync(SANDBOX, { recursive: true, force: true }) })
 
@@ -138,13 +165,26 @@ describe('scripts/backup.sh: store/ coverage is a DENYLIST, not a whitelist', ()
     expect(manifest).not.toContain('store/backups')
   })
 
-  it('the DB files are still handled exactly once (via the explicit WAL-checkpoint path, not double-listed by the denylist sweep)', () => {
-    writeFileSync(join(FAKE_REPO, 'store', 'claudeclaw.db'), 'fake-db-content')
+  it('the DB is still handled exactly once (via the explicit hot-backup path, not double-listed by the denylist sweep)', () => {
+    // 2026-09-10: the DB must be a REAL SQLite file now -- backup.sh performs
+    // an actual hot-backup + integrity_check via backup-sqlite.mjs (real
+    // better-sqlite3, the same engine the live dashboard database uses), not
+    // a raw copy. Garbage content would correctly be REFUSED (see
+    // backup-encryption.test.ts's corrupt-database case), so this fixture
+    // has to be a genuine, valid database, exactly like the production one
+    // always is.
+    const db = new Database(join(FAKE_REPO, 'store', 'claudeclaw.db'))
+    db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)')
+    db.prepare('INSERT INTO t (v) VALUES (?)').run('coverage-test-row')
+    db.close()
     const res = runBackup()
     expect(res.status).toBe(0)
     const manifest = extractedManifest()
     const occurrences = manifest.split('repo/store/claudeclaw.db\n').length - 1
     expect(occurrences).toBe(1)
+    const extracted = new Database(join(SANDBOX, 'extract', 'repo', 'store', 'claudeclaw.db'), { readonly: true })
+    expect(extracted.prepare('SELECT v FROM t').get()).toEqual({ v: 'coverage-test-row' })
+    extracted.close()
   })
 })
 
@@ -215,7 +255,12 @@ describe('scripts/backup.sh: output permissions', () => {
   it('the backups directory is 0700 and the archive is 0600, even under a permissive umask', () => {
     writeFileSync(join(FAKE_REPO, 'store', 'vault.json'), '{}')
     const res = spawnSync('bash', ['-c', `umask 022; exec bash '${join(FAKE_REPO, 'scripts', 'backup.sh')}'`], {
-      env: { ...process.env, HOME: FAKE_HOME },
+      env: {
+        ...process.env,
+        HOME: FAKE_HOME,
+        BACKUP_PASSPHRASE_FILE: PASSPHRASE_FILE,
+        BACKUP_DEST_ROOT: DEST_ROOT,
+      },
       encoding: 'utf-8',
     })
     expect(res.status).toBe(0)

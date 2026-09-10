@@ -93,6 +93,18 @@ the Docker volumes (3) are **separate** and must be moved on their own.
    ```
    Verify perms: `ls -l <repo>/store/.dashboard-token ~/.claude/channels/*/.env`
    should show `-rw-------`.
+
+   If restoring from the ENCRYPTED daily copy (kanban e5c6ce03,
+   `BACKUP_DEST_ROOT/encrypted/claudeclaw-*.tar.gz.gpg`) instead of the local
+   plaintext archive, decrypt first with the SAME passphrase file the backup
+   used (`BACKUP_PASSPHRASE_FILE`, default `~/.marveen-backup-passphrase`):
+   ```bash
+   gpg --batch --no-tty --pinentry-mode loopback \
+     --passphrase-file ~/.marveen-backup-passphrase \
+     --decrypt claudeclaw-YYYYmmdd-HHMMSS.tar.gz.gpg \
+     | tar -xpzf - -C /tmp/restore
+   ```
+   then continue with the same `rsync` steps above.
 4. **Build the app** (do NOT copy `dist/` or `node_modules/` from the old box):
    ```bash
    cd <repo> && npm install && npm run build
