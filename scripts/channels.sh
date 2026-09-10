@@ -1143,6 +1143,12 @@ respawn_log() {
   unset _lines _trimmed
 }
 
+# Watchdog's own pane pid, resolved once for the session's lifetime (a tmux
+# pane's pid does not change while the pane lives, and the `while has-session`
+# loop below exits the moment the session disappears anyway). Same lookup as
+# Check 1 in the post-init unlock block above.
+_watchdog_claude_pid="$($TMUX list-panes -t "$SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)"
+
 # Várakozás amíg a session él
 while $TMUX has-session -t "$SESSION" 2>/dev/null; do
   sleep 5
@@ -1157,13 +1163,23 @@ while $TMUX has-session -t "$SESSION" 2>/dev/null; do
   fi
   unset _bot_pid
   # Fallback for plugin builds that never write bot.pid (e.g. telegram@0.0.1):
-  # treat a running plugin poller as alive. The poller is a bun process whose
-  # env CLAUDE_PLUGIN_ROOT points at the <provider> plugin dir. `ps eww -e`
-  # surfaces each process environment on macOS BSD ps (same technique the
-  # orphan-reaper above uses). Without this the watchdog false-restarts every
-  # ~10 min on plugin versions that don't emit a bot.pid.
+  # treat a running plugin poller as alive. The poller is a bun process, and we
+  # check it as a CHILD OF THIS SESSION'S OWN claude pane_pid (same
+  # process-tree check as the post-init unlock Check 1 above), NOT a host-wide
+  # scan.
+  #
+  # TGWATCHFALLBACK908 (ported from upstream Szotasz/marveen e56bb413,
+  # 2026-09-09): the previous fallback used a host-global
+  # `ps eww -e | grep CLAUDE_PLUGIN_ROOT=.../<provider>`, which matches ANY
+  # agent's plugin process anywhere on the host for the same provider. On our
+  # multi-agent fleet (7 agents, several sharing CHANNEL_PROVIDER=telegram)
+  # that grep can ALWAYS find a hit from a sub-agent's live plugin even when
+  # THIS (main) agent's own plugin is dead -- the exact failure this watchdog
+  # exists to catch, silently defeated. A single-agent install never saw this
+  # because there was only ever one plugin process to find, and it happened to
+  # be the right one.
   if [ "$_plugin_alive" != "true" ]; then
-    if /bin/ps eww -e 2>/dev/null | grep -qE "CLAUDE_PLUGIN_ROOT=[^ ]*/${CHANNEL_PROVIDER}(/|@| |$)"; then
+    if [ -n "$_watchdog_claude_pid" ] && /usr/bin/pgrep -P "$_watchdog_claude_pid" bun >/dev/null 2>&1; then
       _plugin_alive=true
     fi
   fi

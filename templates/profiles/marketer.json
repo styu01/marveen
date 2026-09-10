@@ -6,7 +6,6 @@
   "filesystem": {
     "allow": [
       "Read(${AGENT_DIR}/**)",
-      "Write(${AGENT_DIR}/**)",
       "Edit(${AGENT_DIR}/**)",
       "Read(${HOME}/Downloads/**)",
       "Bash(ls:*)",

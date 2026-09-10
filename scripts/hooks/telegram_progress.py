@@ -15,8 +15,19 @@ model prompt. All diagnostics go to a debug log file under the state dir.
 Token/state dir resolution mirrors the telegram plugin: honor TELEGRAM_STATE_DIR
 (set per-agent), else default to ~/.claude/channels/telegram. This keeps the
 hook correct even if installed globally across agents with different bots.
+
+TGORPHANFILE908 (2026-09-09): every entry carries its OWN `created_at`
+(epoch seconds). The state file is keyed by session_id and can accumulate
+MULTIPLE pending entries across separate rounds if the Stop hook never fired
+for an earlier one -- a fresh submit for the same session appends to the SAME
+file (`old + pending` below) and bumps the file's mtime. Without a per-entry
+timestamp, the watchdog could only see the file's mtime, which reflects the
+NEWEST entry and hides an older orphan sitting right next to it in the same
+array -- the older entry would then inherit the newer round's answer (or be
+missed by the stale-cleanup bound entirely). See telegram_progress_watchdog.py
+for the entry-level consumer of this field.
 """
-import sys, os, json, re, urllib.request
+import sys, os, json, re, time, urllib.request
 
 PLACEHOLDER = "✍️ Dolgozom rajta…"   # ✍️ Dolgozom rajta…
 REACTION = "✍️"                            # ✍️
@@ -121,7 +132,9 @@ def main():
             resp = api(tok, "sendMessage", {"chat_id": chat_id, "text": PLACEHOLDER, "disable_notification": True})
             pmid = resp.get("result", {}).get("message_id")
             if pmid:
-                entry = {"chat_id": chat_id, "message_id": pmid}
+                # TGORPHANFILE908: this entry's own creation time, independent
+                # of the shared state file's mtime (see module docstring).
+                entry = {"chat_id": chat_id, "message_id": pmid, "created_at": time.time()}
                 if transcript_path:
                     entry["transcript_path"] = transcript_path
                 pending.append(entry)
