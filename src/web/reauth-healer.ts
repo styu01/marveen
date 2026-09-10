@@ -5,6 +5,7 @@ import { resolveOwnerChatId } from '../owner-chat.js'
 import { resolveFromPath } from '../platform.js'
 import { listAgentNames } from './agent-config.js'
 import { isAgentRunning, capturePane, startAgentProcess } from './agent-process.js'
+import { beginRestart, endRestart } from './restart-lock.js'
 import { quarantineFleetTokenIfDead } from './claude-credentials-guard.js'
 import { resolveAgentSession } from './channel-mcp-reconnect.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
@@ -437,15 +438,36 @@ function checkSession(label: string, session: string, isMain: boolean, quiet: bo
 // startAgentProcess runs ensureSharedClaudeOnboarded before the fresh claude
 // starts, so the relaunch comes up past the gate.
 async function restartFirstRunGatedAgent(name: string, session: string): Promise<void> {
-  await new Promise<void>((resolve) => {
-    execFile(TMUX, ['kill-session', '-t', session], { timeout: 5000 }, () => resolve())
-  })
-  await sleep(1000)
+  // RESTARTRACE901 (ported from upstream Szotasz/marveen f78bfe63a,
+  // 2026-09-10): a managed restart already owns this agent; killing its
+  // session from here would tear down the replacement mid-boot. See
+  // restart-lock.ts.
+  //
+  // Codex review follow-up (2026-09-10): checking isRestartInFlight was not
+  // enough -- this function tears the session down and starts the agent
+  // ITSELF, outside restartAgentProcess, so it never CLAIMED the lock either.
+  // That left the exact race this whole mechanism exists to close: for the
+  // ~1s between the teardown below and the startAgentProcess call, isAgentRunning()
+  // reads false and no other supervisor could see a restart was under way, so
+  // reconcile/schedule-runner could win the start race with THEIR options.
+  // Claim the slot here too, for the full teardown->start window.
+  if (!beginRestart(name)) {
+    logger.info({ name }, 'reauth-healer: managed restart in flight -- skipping first-run-gate relaunch')
+    return
+  }
   try {
-    const r = await startAgentProcess(name)
-    if (!r.ok) logger.warn({ name, error: r.error }, 'reauth-healer: first-run-gate relaunch failed')
-  } catch (err) {
-    logger.warn({ err, name }, 'reauth-healer: first-run-gate relaunch threw')
+    await new Promise<void>((resolve) => {
+      execFile(TMUX, ['kill-session', '-t', session], { timeout: 5000 }, () => resolve())
+    })
+    await sleep(1000)
+    try {
+      const r = await startAgentProcess(name)
+      if (!r.ok) logger.warn({ name, error: r.error }, 'reauth-healer: first-run-gate relaunch failed')
+    } catch (err) {
+      logger.warn({ err, name }, 'reauth-healer: first-run-gate relaunch threw')
+    }
+  } finally {
+    endRestart(name)
   }
 }
 

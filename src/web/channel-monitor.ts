@@ -8,6 +8,8 @@ import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, SERVICE_ID, BOT_NAME, CHANNEL_PROVIDER, PROJECT_ROOT, RESPAWN_ENABLED } from '../config.js'
 import { DISTRIBUTION_DEFAULT_AGENT_MODEL } from '../config-registry.js'
 import { agentDir, listAgentNames, readAgentChannelProvider } from './agent-config.js'
+import { listKanbanCards } from '../db.js'
+import { buildRecoveryBrief, parseGitStatusShort, type RecoveryFacts } from './restart-recovery-brief.js'
 import {
   agentHasChannel,
   agentSessionName,
@@ -29,6 +31,7 @@ import {
   answerFirstRunGates,
   shSingleQuote,
 } from './agent-process.js'
+import { beginRestart, endRestart, isRestartInFlight } from './restart-lock.js'
 import { withSessionSendLock } from './session-send-lock.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes, collectPollerEvidence } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
@@ -84,6 +87,32 @@ function resolveAgentProvider(name: string): ChannelProviderType {
 
 const agentDownSince: Map<string, number> = new Map()
 const agentLastRestart: Map<string, number> = new Map()
+
+// DANICTXHUROK906 (ported from upstream Szotasz/marveen 6cc93947, 2026-09-10):
+// the context-guard's own restart path (context-guard-runner.ts) stop+fresh-
+// starts an agent, but that stop is INVISIBLE to this reconcile loop -- the
+// guard never wrote agentLastRestart, so in the window between the guard's
+// stop and its fresh start, reconcileDesiredAgents saw the agent "down" and
+// re-launched it via startAgentProcess() with NO opts -> fresh=false, i.e.
+// --continue for a channel-less agent. The guard's own fresh start then
+// no-op'd ("already running") and the heavy prior context was resumed. The
+// guard now calls markAgentRestartPending() BEFORE its stop, so this loop
+// defers for the grace window and the guard's fresh start wins the race.
+// Composes with restart-lock.ts's isRestartInFlight (RESTARTRACE901, already
+// ported in this batch): that one covers the exact stop->start window across
+// ALL supervisors, this one additionally covers the grace period right after,
+// so a start that lands just after endRestart() still defers.
+export function markAgentRestartPending(name: string): void {
+  agentLastRestart.set(name, Date.now())
+}
+
+// The reconcile grace predicate, pulled out so it is unit-testable without
+// driving the whole loop. True = a (re)start for `name` happened within the
+// grace window, so reconcile must NOT launch a second (non-fresh) session.
+export function isWithinRestartGrace(name: string, nowMs: number = Date.now()): boolean {
+  const last = agentLastRestart.get(name)
+  return last != null && nowMs - last < AGENT_RESTART_GRACE_MS
+}
 // Agents already warned about a missing channel token, so the per-sweep probe
 // does not repeat the identical WARN every minute forever (observed 2026-07-20:
 // teamer, an agent with no channel token bound, emitted the same line ~1440x/day
@@ -1731,6 +1760,82 @@ function shouldEscalateMarveenDown(): boolean {
   return now - marveenSuspectFirstSeen >= MARVEEN_DOWN_CONFIRM_MS
 }
 
+// ---- recovery brief after a fresh restart (ported from upstream Szotasz/
+// marveen bdecaccc, 2026-09-10; card 3a64403b) --------------------------------
+// A watchdog restart brings the agent back on a FRESH session: the plugin
+// reloads, the conversation does not. The agent then sits at an empty prompt
+// while its uncommitted branch and its in_progress card wait for it. These
+// three pieces close that gap; the decision of WHETHER to speak lives in the
+// pure buildRecoveryBrief (no facts -> no message, so an idle agent restarted
+// for plugin reasons is never interrupted).
+
+// How many changed files the brief lists before it says "and more". A restart
+// after a long spell can leave dozens; the brief is a pointer, not a diff.
+const RECOVERY_BRIEF_MAX_FILES = 12
+// Wait before typing the brief into the fresh session. The restart path
+// already schedules modal dismissal and the plugin-unlock probe; this sits
+// after both so the brief does not race a dialog or the probe's keystrokes.
+// sendPromptToSession still waits for idle on its own -- this delay is about
+// ORDER, not about hoping the session happens to be ready.
+const RECOVERY_BRIEF_DELAY_MS = 90_000
+
+// Collect what the fleet knew about an agent at restart time. Every failure is
+// swallowed into a null/empty field: a brief is a convenience, and a monitor
+// sweep must never fall over because a directory is missing or git is unhappy.
+function gatherRecoveryFacts(agent: string): RecoveryFacts {
+  let branch: string | null = null
+  let dirty: RecoveryFacts['dirty'] = []
+  let dirtyTruncated = false
+  try {
+    const dir = agentDir(agent)
+    if (existsSync(join(dir, '.git'))) {
+      try {
+        branch = execFileSync('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 5000 }).toString().trim() || null
+      } catch { /* detached HEAD or no repo -- the brief works without a branch */ }
+      const out = execFileSync('git', ['-C', dir, 'status', '--short'], { timeout: 5000 }).toString()
+      const parsed = parseGitStatusShort(out, RECOVERY_BRIEF_MAX_FILES)
+      dirty = parsed.dirty
+      dirtyTruncated = parsed.truncated
+    }
+  } catch (err) {
+    logger.debug({ err, agent }, 'recovery-brief: git facts unavailable')
+  }
+
+  let inProgress: RecoveryFacts['inProgress'] = []
+  try {
+    // listKanbanCards() already excludes archived cards (archived_at IS NULL
+    // in its own query), so no separate check is needed here.
+    inProgress = listKanbanCards()
+      .filter((c) => c.assignee === agent && c.status === 'in_progress')
+      .map((c) => ({ id: c.id, title: c.title }))
+  } catch (err) {
+    logger.debug({ err, agent }, 'recovery-brief: kanban facts unavailable')
+  }
+
+  return { agent, branch, dirty, dirtyTruncated, inProgress }
+}
+
+// After a fresh restart, tell the new session what it was in the middle of.
+// Fire-and-forget: scheduled, never awaited by the sweep.
+export function scheduleRecoveryBrief(agent: string, session: string): void {
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const facts = gatherRecoveryFacts(agent)
+        const brief = buildRecoveryBrief(facts)
+        if (!brief) {
+          logger.info({ agent, session }, 'recovery-brief: nothing in flight, staying quiet')
+          return
+        }
+        const res = await sendPromptToSession(session, brief, null, { lockMode: 'deliver' })
+        logger.info({ agent, session, res, cards: facts.inProgress.length, dirty: facts.dirty.length }, 'recovery-brief sent after restart')
+      } catch (err) {
+        logger.warn({ err, agent, session }, 'recovery-brief could not be delivered')
+      }
+    })()
+  }, RECOVERY_BRIEF_DELAY_MS)
+}
+
 export function startChannelPluginMonitor(): NodeJS.Timeout | null {
   // Respawn/keep-alive is production-only. On any non-production host (e.g. a
   // local dev checkout) we never respawn the main agent or auto-restart
@@ -2138,34 +2243,60 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           continue
         }
         logger.warn({ agent: t.agentName, provider: t.provider, failures }, 'Agent channel plugin down -- auto-restarting')
+        // Codex review follow-up (2026-09-10): this cascade does its own
+        // stop+delay(8s)+start instead of going through restartAgentProcess,
+        // so it never claimed the restart-lock slot -- a ~10s window where
+        // isRestartInFlight(name) read false while a managed restart was
+        // genuinely under way, wide open to the exact race RESTARTRACE901
+        // exists to close (reconcile/schedule-runner could win the start race
+        // with THEIR default options). Claim it for the whole stop->start span.
+        if (!beginRestart(t.agentName!)) {
+          logger.info({ agent: t.agentName }, 'Channel-down restart: another managed restart already in flight -- deferring')
+          continue
+        }
         try {
-          await stopAgentProcess(t.agentName!)
-          // Settle before the fresh start. stopAgentProcess already reaps this
-          // agent's channel orphans + waits 2s; add more so the shared plugin
-          // cache (bun run --cwd <plugin>, .in_use markers) fully releases from
-          // the torn-down claude before the new one loads the plugin. A too-short
-          // gap is the suspected trigger for the plugin coming up ABSENT on a
-          // rapid restart (2026-07-01 rocket/mantis loop). Fleet-wide staggering
-          // (CHANNEL_RESTART_STAGGER_MS) means this extra block runs at most once
-          // per 90s, so it does not stall the monitor's per-agent sweep.
-          // Non-blocking (off the event loop); duration preserved exactly (#481
-          // plugin-cache-release wait, added 2026-07-01 -- MUST stay 8s, never 2s).
-          await delay(8000)
-          lastChannelAgentRestartAt = Date.now()
-          // FRESH (no --continue): on CC 2.1.193 a --continue resume does NOT load
-          // the --channels plugin MCP server, so the agent comes up with no plugin
-          // and no poller (verified: continue -> "Plugin not found" in /mcp; fresh
-          // -> plugin loads + poller attaches). Context is dropped, memory persists.
-          await startAgentProcess(t.agentName!, { fresh: true })
-          agentLastRestart.set(t.agentName!, Date.now())
-          agentDownSince.delete(t.session)
-          agentBusyDeferAlerted.delete(t.session)
-          // Count this restart as failed until a later sweep sees the plugin
-          // alive (which resets the counter). Repeated failures back off the
-          // next restart exponentially instead of churning every base-grace.
-          // Persisted to disk so a dashboard restart does not reset the counter.
-          agentRestartFailures.set(t.agentName!, failures + 1)
-          savePersistedAgentFailures(t.agentName!, failures + 1)
+          try {
+            await stopAgentProcess(t.agentName!)
+            // Settle before the fresh start. stopAgentProcess already reaps this
+            // agent's channel orphans + waits 2s; add more so the shared plugin
+            // cache (bun run --cwd <plugin>, .in_use markers) fully releases from
+            // the torn-down claude before the new one loads the plugin. A too-short
+            // gap is the suspected trigger for the plugin coming up ABSENT on a
+            // rapid restart (2026-07-01 rocket/mantis loop). Fleet-wide staggering
+            // (CHANNEL_RESTART_STAGGER_MS) means this extra block runs at most once
+            // per 90s, so it does not stall the monitor's per-agent sweep.
+            // Non-blocking (off the event loop); duration preserved exactly (#481
+            // plugin-cache-release wait, added 2026-07-01 -- MUST stay 8s, never 2s).
+            await delay(8000)
+            lastChannelAgentRestartAt = Date.now()
+            // FRESH (no --continue): on CC 2.1.193 a --continue resume does NOT load
+            // the --channels plugin MCP server, so the agent comes up with no plugin
+            // and no poller (verified: continue -> "Plugin not found" in /mcp; fresh
+            // -> plugin loads + poller attaches). Context is dropped, memory persists.
+            const started = await startAgentProcess(t.agentName!, { fresh: true })
+            if (started.ok) {
+              // The fresh session has no memory of what it was doing. If work
+              // was in flight, tell it -- once, after the modal/probe traffic
+              // settles, and only when there is something concrete to say.
+              // Gated on a genuine start: a failed startAgentProcess means
+              // there is no fresh session to inject into (Codex review,
+              // 2026-09-10).
+              scheduleRecoveryBrief(t.agentName!, t.session)
+            } else {
+              logger.error({ agent: t.agentName, error: started.error }, 'Channel-down restart: fresh start failed -- no session to send a recovery brief to')
+            }
+            agentLastRestart.set(t.agentName!, Date.now())
+            agentDownSince.delete(t.session)
+            agentBusyDeferAlerted.delete(t.session)
+            // Count this restart as failed until a later sweep sees the plugin
+            // alive (which resets the counter). Repeated failures back off the
+            // next restart exponentially instead of churning every base-grace.
+            // Persisted to disk so a dashboard restart does not reset the counter.
+            agentRestartFailures.set(t.agentName!, failures + 1)
+            savePersistedAgentFailures(t.agentName!, failures + 1)
+          } finally {
+            endRestart(t.agentName!)
+          }
         } catch (err) {
           logger.error({ err, agent: t.agentName }, 'Failed to auto-restart agent after channel plugin down')
         }
@@ -2244,8 +2375,19 @@ async function reconcileDesiredAgents(): Promise<void> {
   try {
     for (const name of down) {
       if (isAgentRunning(name)) continue
-      const last = agentLastRestart.get(name)
-      if (last != null && Date.now() - last < AGENT_RESTART_GRACE_MS) continue
+      // RESTARTRACE901 (ported from upstream Szotasz/marveen f78bfe63a,
+      // 2026-09-10): a managed restart (context guard, auto-restart, model
+      // fallback, the dashboard button) is stop+start, and isAgentRunning()
+      // reports false for the ~2s the stop spends waiting on tmux. Starting the
+      // agent in that window does not heal a crash -- it overtakes the
+      // restarter and boots the agent with OUR options instead of theirs
+      // (default = --continue, which is exactly what a saturation rescue is
+      // trying to drop). See restart-lock.ts.
+      if (isRestartInFlight(name)) {
+        logger.info({ agent: name }, 'Reconcile: managed restart in flight -- leaving the start to it')
+        continue
+      }
+      if (isWithinRestartGrace(name)) continue
       if (!memGateAllowsStart(name)) continue   // Commit 3 v1: safe-mode / memory gate
       logger.warn({ agent: name }, 'Desired agent not running -- auto-starting (reconcile)')
       try {

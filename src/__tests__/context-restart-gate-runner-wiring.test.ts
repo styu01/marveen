@@ -23,7 +23,13 @@ vi.mock('../logger.js', () => ({
 }))
 vi.mock('../db.js', () => ({
   getDispatchedPendingStats: vi.fn(() => ({ count: 0, hasStale: false })),
-  hasOpenInboundQuestion: vi.fn(() => false),
+  // LEDGERACK905 (ported from upstream Szotasz/marveen 4fb9fbcbf, 2026-09-10):
+  // the runner now calls openInboundQuestionMessageId, not
+  // hasOpenInboundQuestion (kept in db.ts for other callers, but unused here).
+  // Mocking only the old name would silently fall through the runner's own
+  // try/catch to `false` on every call -- passing, but no longer exercising
+  // the real wiring. null = "nothing open", matching the old mock's false.
+  openInboundQuestionMessageId: vi.fn(() => null),
   createAgentMessage: vi.fn(),
 }))
 vi.mock('../web/agent-process.js', () => ({

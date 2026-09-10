@@ -4,6 +4,7 @@ import {
   findClaudePidInTree,
   extractMcpPackageNames,
   isMcpProcess,
+  openQuestionBlocks,
   TASKSTATE_FRESH_WINDOW_MS,
 } from '../web/context-restart-gate-runner.js'
 import {
@@ -577,5 +578,37 @@ describe('hasLiveTaskState freshness window', () => {
       null,
     )
     expect(d.action).toBe('allow')
+  })
+})
+
+// LEDGERACK905 (ported from upstream Szotasz/marveen 4fb9fbcbf, 2026-09-10):
+// an unanswered inbound holds the gate only until the drain has actually put
+// it in front of the agent. Upstream's measured case: a bare "ok" reply held
+// the gate for eight hours at 630% of the threshold, and the only escape
+// would have been a midnight reply nobody needed. The rule: block until
+// surfaced, not on a timer.
+describe('openQuestionBlocks', () => {
+  it('does not block when nothing is open', () => {
+    expect(openQuestionBlocks(null, null)).toBe(false)
+    expect(openQuestionBlocks(null, '8246')).toBe(false)
+  })
+
+  it('blocks an open question the drain has not surfaced yet', () => {
+    expect(openQuestionBlocks('8246', null)).toBe(true)
+  })
+
+  it('stops blocking once the drain surfaced THAT message', () => {
+    expect(openQuestionBlocks('8246', '8246')).toBe(false)
+  })
+
+  it('still blocks when the drain last surfaced a DIFFERENT message', () => {
+    expect(openQuestionBlocks('8250', '8246')).toBe(true)
+  })
+
+  it('holds when the open question carries no identifiable message id', () => {
+    // Unknown id cannot be matched against a marker, and "unknown" must read
+    // as "the agent has not seen it".
+    expect(openQuestionBlocks('', '8246')).toBe(true)
+    expect(openQuestionBlocks('', null)).toBe(true)
   })
 })

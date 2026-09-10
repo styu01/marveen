@@ -14,7 +14,7 @@ import { getHardGuardPhase } from './context-guard-runner.js'
 import { readGateConfig, readGateRunState, writeGateRunState } from './context-restart-gate-store.js'
 import {
   getDispatchedPendingStats,
-  hasOpenInboundQuestion,
+  openInboundQuestionMessageId,
   createAgentMessage,
 } from '../db.js'
 import {
@@ -84,6 +84,43 @@ export function isInfrastructureChild(childAgeS: number, claudeAgeS: number): bo
   if (childAgeS < CHILD_MIN_AGE_S) return true
   if (childAgeS >= claudeAgeS - INFRA_AGE_DELTA_S) return true
   return false
+}
+
+/**
+ * The last inbound message the ledger drain surfaced for this agent, or null.
+ * The drain (scripts/hooks/ledger-live-drain.py) writes the id into
+ * store/.ledger-drain-<agent> when it puts a lost inbound in front of the
+ * agent; the sanitisation here mirrors its _statefile().
+ */
+function drainSurfacedMessageId(ledgerAgentId: string): string | null {
+  const safe = String(ledgerAgentId).replace(/[^A-Za-z0-9_-]/g, '_')
+  try {
+    const raw = readFileSync(join(PROJECT_ROOT, 'store', `.ledger-drain-${safe}`), 'utf-8').trim()
+    return raw || null
+  } catch { return null }
+}
+
+/**
+ * Does an unanswered inbound still justify holding the gate shut?
+ *
+ * LEDGERACK905 (ported from upstream Szotasz/marveen 4fb9fbcbf, 2026-09-10).
+ * Only until the agent has actually been SHOWN it. Before that, a /clear could
+ * lose a question nobody has read; after it, the agent knows and the decision
+ * to answer is its own -- and some messages rightly get no answer. Upstream's
+ * measured case: a bare "ok" reply held the gate for eight hours at 630% of
+ * the threshold, and the only way out would have been to wake the owner at
+ * midnight with a reply nobody needed. Block until surfaced, no arbitrary
+ * timer.
+ *
+ * Pure so the rule is testable without a database or a statefile.
+ */
+export function openQuestionBlocks(
+  openMessageId: string | null,
+  surfacedMessageId: string | null,
+): boolean {
+  if (openMessageId === null) return false      // nothing open
+  if (openMessageId === '') return true         // open, but unidentifiable: hold
+  return openMessageId !== surfacedMessageId    // held until the drain showed it
 }
 
 function sessionFor(name: string): string {
@@ -407,7 +444,11 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
   })()
 
   const openQuestion = (() => {
-    try { return hasOpenInboundQuestion(agentIdForLedger(name)) }
+    try {
+      const ledgerId = agentIdForLedger(name)
+      return openQuestionBlocks(openInboundQuestionMessageId(ledgerId),
+                                drainSurfacedMessageId(ledgerId))
+    }
     catch { return false }
   })()
 

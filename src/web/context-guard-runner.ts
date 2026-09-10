@@ -2,7 +2,7 @@ import { statSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
-import { hardRestartMarveenChannels, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS } from './channel-monitor.js'
+import { hardRestartMarveenChannels, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS, markAgentRestartPending } from './channel-monitor.js'
 import { shouldDeferForRecentRespawn } from './stuck-tool-call-watcher.js'
 import { listAgentNames, listAllAgentNames, agentDir, readAgentModel, readAgentClaudeConfigDir, readAgentRemoteHost } from './agent-config.js'
 import {
@@ -275,7 +275,20 @@ async function performRestart(name: string): Promise<void> {
     const res = hardRestartMarveenChannels()
     if (!res.ok) throw new Error(res.error ?? 'main channels hard restart failed')
   } else {
-    await restartAgentProcess(name, { fresh: true })
+    // DANICTXHUROK906 (ported from upstream Szotasz/marveen 6cc93947,
+    // 2026-09-10): claim the reconcile grace window BEFORE the stop, so
+    // reconcileDesiredAgents() does not see the agent "down" mid-restart and
+    // re-launch it non-fresh (--continue), which would defeat the whole point
+    // of a context-guard restart -- dropping the saturated context.
+    markAgentRestartPending(name)
+    // RESTARTRACE901 (ported from upstream Szotasz/marveen f78bfe63a,
+    // 2026-09-10): the result was discarded here before this fix.
+    // restartAgentProcess has an early "Agent is already running" return, and a
+    // supervisor that started the agent inside our stop window (restart-lock.ts)
+    // trips it -- so the rescue reported success while the pane still held the
+    // saturated session it was supposed to drop.
+    const res = await restartAgentProcess(name, { fresh: true })
+    if (!res.ok) throw new Error(res.error ?? 'agent restart failed')
   }
 }
 
@@ -432,7 +445,21 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
         } catch (err) {
           logger.warn({ err, name }, 'context-guard: pre-restart pane snapshot failed')
         }
-        await performRestart(name)
+        try {
+          await performRestart(name)
+        } catch (err) {
+          // RESTARTRACE901 (ported from upstream Szotasz/marveen f78bfe63a,
+          // 2026-09-10): guardStates was advanced to the post-restart phase
+          // BEFORE this switch, so a failed rescue would otherwise be filed as
+          // a completed one: the guard would wait for a session it never
+          // started, inject a resume prompt into the old saturated pane, and
+          // then sit out its cooldown. Roll the state back so the next sweep
+          // re-measures and retries, and never claim the restart on the
+          // message queue.
+          guardStates.set(name, INITIAL_GUARD_STATE)
+          logger.error({ err, name, reason: decision.reason }, 'context-guard: rescue restart FAILED -- state rolled back for retry')
+          break
+        }
         try {
           createAgentMessage(
             name,
