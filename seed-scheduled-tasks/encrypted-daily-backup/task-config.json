@@ -3,7 +3,7 @@
   "agent": "{{MAIN_AGENT_ID}}",
   "enabled": false,
   "type": "command",
-  "description": "Titkosított teljes napi mentés (kanban e5c6ce03). Opt-in: ALAPÉRTELMEZETTEN KIKAPCSOLVA. Feltétele: BACKUP_PASSPHRASE_FILE (alapból ~/.marveen-backup-passphrase, 0600, egy sor) és BACKUP_DEST_ROOT (Drive-szinkronizált célmappa) helyesen beállítva, valamint gpg telepítve -- ezeket Istvan hagyja jóvá és állítja be kézzel, mielőtt bekapcsolja. Első futtatás előtt kézi, felügyelt próbát kér a fejlesztési folyamat.",
+  "description": "Titkosított teljes napi mentés (kanban e5c6ce03). Opt-in: ALAPÉRTELMEZETTEN KIKAPCSOLVA. Feltétele: BACKUP_PASSPHRASE_FILE (alapból ~/.marveen-backup-passphrase, 0600, egy sor) és BACKUP_DEST_ROOT (Drive-szinkronizált célmappa) helyesen beállítva, valamint gpg telepítve -- ezeket Istvan hagyja jóvá és állítja be kézzel, mielőtt bekapcsolja. Első futtatás előtt kézi, felügyelt próbát kér a fejlesztési folyamat. MEGJEGYZÉS (2026-09-10, kanban 13e3e0a7): ez a SABLON szándékosan generikus marad (csak backup.sh, nincs cél-override) -- a TÉNYLEGES élesben futó ~/.claude/scheduled-tasks/encrypted-daily-backup/task-config.json ezen a hoszton host-specifikus BACKUP_DEST_ROOT-tal (WSL DrvFs útvonal, mert a Google Drive nem látja a WSL fájlrendszert) és egy láncolt scripts/store-mirror.sh lépéssel bővült -- ezt a sablonba nem emeltük be, mert más installon (natív Linux/macOS, más célmappa) nem lenne értelmes alapértelmezett.",
   "command": "cd '{{INSTALL_DIR}}' && bash '{{INSTALL_DIR}}/scripts/backup.sh'",
   "timeoutMs": 120000,
   "failThreshold": 1,
