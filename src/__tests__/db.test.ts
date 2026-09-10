@@ -338,6 +338,68 @@ describe('getDispatchedPendingStats -- a lezaro visszajelzes nem dispatcholt mun
       .toBe(getDispatchedPendingStats('stat-a', NOW, CUTOFF).count)
     expect(getDispatchedPendingStats('stat-c', NOW, CUTOFF).count).toBe(1)
   })
+
+  // SUPHOX318 (2026-09-10, kanban 5f49fc94): ket kulon heurisztikat is
+  // probaltunk arra hogy egy KESOBBI, a cimzettol erkezo valasz (status meg
+  // pending/delivered, senki nem PUT-olta done-ra) is oldja a blokkot --
+  // mindkettot elutasitotta a fuggetlen Codex review, mert egy generikus
+  // valasz (pl. "vettem, dolgozom rajta") nem bizonyitja hogy EREDMENY
+  // erkezett, csak hogy a partner irt valamit. A schema-ban nincs reply-to/
+  // thread-id mezo, tehat nincs mod biztonsagosan korrelalni MELYIK
+  // dispatch-ra vonatkozik egy valasz. Ld. a fuggveny doc-kommentjet a ket
+  // elutasitott kiserletrol. Ez a teszt EXPLICIT regresszio-vedelem: ha
+  // valaki ujra probalna reply-alapu feloldast bevezetni, ez a teszt piros
+  // lesz, amig a valodi, biztonsagos megoldas (explicit korrelacio VAGY
+  // fegyelmezett PUT done -- ld. doc-komment) meg nincs implementalva.
+  it('a cimzett KESOBBI valasza NEM oldja a dispatchot -- csak a formalis done/failed status szamit', () => {
+    createAgentMessage('sup-a', 'sup-b', 'nezd at ezt a diffet')
+    const before = getDispatchedPendingStats('sup-a', NOW, CUTOFF).count
+    expect(before).toBeGreaterThanOrEqual(1)
+
+    createAgentMessage('sup-b', 'sup-a', 'johagyva, mehet tovabb')
+    const after = getDispatchedPendingStats('sup-a', NOW, CUTOFF).count
+    expect(after).toBe(before)
+  })
+
+  it('ket egyidejű dispatch, egy valasz -- MINDKETTO tovabbra is szamit (Codex ellenpelda, semmi nem oldodik reply-ra)', () => {
+    createAgentMessage('cdx-a', 'cdx-b', 'Task-1: nezd at ezt')
+    createAgentMessage('cdx-a', 'cdx-b', 'Task-2: es ezt is')
+    const before = getDispatchedPendingStats('cdx-a', NOW, CUTOFF).count
+    expect(before).toBeGreaterThanOrEqual(2)
+
+    createAgentMessage('cdx-b', 'cdx-a', 'Task-2-n dolgozom')
+    const after = getDispatchedPendingStats('cdx-a', NOW, CUTOFF).count
+    expect(after).toBe(before)
+  })
+
+  it('csak a formalis PUT done zarja le a dispatchot, meg akkor is ha kozben valasz is erkezett', () => {
+    const dispatched = createAgentMessage('sup-l', 'sup-m', 'feladat')
+    createAgentMessage('sup-m', 'sup-l', 'valasz, de ez nem zar semmit')
+    const before = getDispatchedPendingStats('sup-l', NOW, CUTOFF).count
+    expect(before).toBeGreaterThanOrEqual(1)
+
+    markMessageDone(dispatched.id, 'kesz')
+    const after = getDispatchedPendingStats('sup-l', NOW, CUTOFF).count
+    expect(after).toBe(before - 1)
+  })
+
+  it('stale (cutoffon tuli) dispatch nem blokkol, de hasStale jelzi', () => {
+    const OLD_NOW = NOW + 10 * 60 * 60 * 1000 // 10h later, well beyond the 2h cutoff
+    createAgentMessage('sup-j', 'sup-k', 'regi feladat')
+    expect(getDispatchedPendingStats('sup-j', OLD_NOW, CUTOFF).hasStale).toBe(true)
+    expect(getDispatchedPendingStats('sup-j', OLD_NOW, CUTOFF).count).toBe(0)
+  })
+
+  // SUPHOX318 masodik Codex-talalat (mindket review-korben megerositve, ez a
+  // resz maradt is): az onmaganak kuldott (Level-1 "[FELHÍVÁS]") uzenetek
+  // MOST mar explicit kizarva, ugyanugy mint getWaitingOutboundMessages-ben
+  // -- kulonben soha nem kapnak "done"-t sem, es orokre felhalmozodnanak,
+  // ugyanaz a teves-blokk hibaosztaly maradna nyitva.
+  it('az onmaganak kuldott uzenet NEM szamit (from_agent = to_agent kizarva)', () => {
+    createAgentMessage('sup-self', 'sup-self', '[FELHÍVÁS] level1 note magamnak')
+    const stats = getDispatchedPendingStats('sup-self', NOW, CUTOFF)
+    expect(stats.count).toBe(0)
+  })
 })
 
 // SONWIN905 (2026-09-05, v3 plan section 5): getDispatchedPendingStats/

@@ -2524,6 +2524,57 @@ export interface DispatchedPendingStats {
  * a busy agent permanently ineligible for a soft restart -- on 2026-08-12 the
  * gate reported 11 blocking messages for the main agent and several were its
  * own acknowledgements.
+ *
+ * SUPHOX318 (2026-09-10, kanban 5f49fc94): tried and REJECTED, twice, on
+ * federated Codex review -- do not re-attempt without new information. The
+ * false-block this card reports is real (a dispatched message's status only
+ * ever moves to done/failed via an explicit PUT /api/messages/:id, and
+ * nothing in the normal inter-agent status-update flow calls that for an
+ * ordinary back-and-forth exchange, so a healthy multi-round exchange like a
+ * Codex review accumulates dispatches that never formally close). But every
+ * heuristic tried to resolve it via message CONTENT/TIMING inference turned
+ * out to be unsound for a fail-closed gate:
+ *
+ *   Attempt 1: a dispatch resolves the moment the recipient sends ANYTHING
+ *   back. Rejected (Codex, msg 2181/2180): fail-open with concurrent
+ *   dispatches to the same peer -- one reply about Task-2 would silently
+ *   also resolve an unrelated, still-unanswered Task-1.
+ *
+ *   Attempt 2: FIFO turn-pairing (the Nth dispatch to a peer resolves only
+ *   with the peer's Nth message back), which bounds resolved-count to the
+ *   number of replies actually received and provably cannot reproduce
+ *   attempt 1's cardinality bug. Rejected anyway (Codex, msg 2185/2187),
+ *   correctly: bounding the COUNT is not the same as proving the CONTENT.
+ *   A single "vettem, dolgozom rajta" acknowledgement is not a result --
+ *   the gate's own contract is "not yet received a result" -- but the FIFO
+ *   pairing cannot distinguish an interim status ping from an actual
+ *   completion, so it can still release the gate while the dispatched work
+ *   is genuinely still outstanding. Codex also flagged that full-history
+ *   chronological ranking (not scoped to messages after the dispatch) can
+ *   drift out of alignment if the peer ever sent an unrelated message to
+ *   this agent BEFORE the dispatch existed, permanently misaligning the
+ *   rank pairing for that (from,to) pair.
+ *
+ * Both rounds converged on the same architectural verdict: without a real
+ * reply-to/thread-id correlation in the schema (which agent_messages does
+ * not have -- no caller today would populate it even if added), a generic
+ * peer reply cannot safely unblock the gate. The only sound resolution
+ * signal remains the explicit one this function already had before
+ * SUPHOX318: status done/failed via PUT /api/messages/:id. Fixing the
+ * ACTUAL false-block therefore needs a different kind of change than this
+ * function -- either (a) an adopted fleet-wide reply-to/ack-with-message-id
+ * convention (a CLAUDE.md-level protocol decision across every agent, not a
+ * db.ts change), or (b) agents disciplined about closing a dispatch via PUT
+ * once a thread concludes. Left open for BELA/Istvan to decide; not
+ * re-litigated here.
+ *
+ * What DID ship from this investigation (both rounds agreed these were
+ * correct, independent of the above): self-addressed (from_agent = to_agent)
+ * messages -- e.g. the CLAUDE.md Level-1 autonomy "[FELHÍVÁS]" pattern -- are
+ * now excluded outright, same precedent as getWaitingOutboundMessages'
+ * from_agent != to_agent exclusion. They never get a reply "from themselves"
+ * either, so without this they accumulate forever, which is its own
+ * independent false-block source.
  */
 export const COMPLETION_REPORT_PREFIX = '[Eredmény]'
 
@@ -2538,13 +2589,15 @@ export function getDispatchedPendingStats(
   const ackPattern = `${COMPLETION_REPORT_PREFIX}%`
   const liveRow = db.prepare(
     `SELECT COUNT(*) AS cnt FROM agent_messages
-       WHERE from_agent = ? AND status IN ('pending','delivered')
+       WHERE from_agent = ? AND to_agent != from_agent
+         AND status IN ('pending','delivered')
          AND content NOT LIKE ?
          AND CAST(created_at AS INTEGER) > ?`,
   ).get(fromAgent, ackPattern, cutoffEpoch) as { cnt: number }
   const staleRow = db.prepare(
     `SELECT COUNT(*) AS cnt FROM agent_messages
-       WHERE from_agent = ? AND status IN ('pending','delivered')
+       WHERE from_agent = ? AND to_agent != from_agent
+         AND status IN ('pending','delivered')
          AND content NOT LIKE ?
          AND CAST(created_at AS INTEGER) <= ?`,
   ).get(fromAgent, ackPattern, cutoffEpoch) as { cnt: number }
