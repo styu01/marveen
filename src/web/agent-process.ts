@@ -1064,10 +1064,15 @@ export function sessionExistsOnHost(host: string | null, session: string): boole
   }
 }
 
-export function getAgentRunningSince(name: string): number | null {
+// MSGWARN908 (ported from upstream Szotasz/marveen 1ace193, 2026-09-10): the
+// main agent's tmux session is MAIN_CHANNELS_SESSION (`${MAIN_AGENT_ID}-channels`),
+// not agentSessionName(name) (`agent-<name>`) -- callers that already resolved
+// the right session name (getAgentSummary for the main agent) need to pass it
+// through instead of having this re-derive the wrong one.
+export function getAgentRunningSince(name: string, session: string = agentSessionName(name)): number | null {
   try {
     const host = readAgentRemoteHost(name)
-    const out = captureTmux(host, ['display-message', '-p', '-t', agentSessionName(name), '#{session_created}']).trim()
+    const out = captureTmux(host, ['display-message', '-p', '-t', session, '#{session_created}']).trim()
     const ts = parseInt(out, 10)
     return Number.isFinite(ts) ? ts : null
   } catch {

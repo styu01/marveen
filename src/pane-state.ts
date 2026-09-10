@@ -139,6 +139,33 @@ const BUSY_INDICATORS: RegExp[] = [
 const BUSY_ESC_TO_INTERRUPT_RX = /\besc to interrupt\b/
 const LIVE_FOOTER_REGION_LINES = 5
 
+/**
+ * The last `count` lines that still have content, ignoring a blank tail.
+ *
+ * ED50E8B5 (ported from upstream Szotasz/marveen 284df69b + 4267c7c8,
+ * 2026-09-10): every footer/busy probe in this file used to count back from
+ * the last LINE of the capture. A pane whose prompt sits high on the screen
+ * with empty rows below it -- what a fresh session shows when its FIRST tool
+ * call needs consent, or what tmux capture-pane returns whenever the content
+ * is shorter than the pane -- then had its footer fall outside the window,
+ * and the probe reported nothing at all. Measured on the shipped code: a live
+ * consent prompt with an 18-line blank tail read detectsBlockingMenu=false
+ * AND detectsPermissionDialog=false (the monitor neither alerted nor
+ * recovered), and separately detectPaneState flipped busy -> idle on a busy
+ * fleet agent with the same blank tail -- an idle verdict is a licence to
+ * deliver, so the router would push a message into a live turn.
+ *
+ * Counting from the last line with content keeps the window size honest (the
+ * footer really is within a few lines of the last thing drawn) while making
+ * the prompt's POSITION on screen stop mattering.
+ */
+function liveTailRegion(lines: string[], count: number): string {
+  let end = lines.length
+  while (end > 0 && lines[end - 1].trim() === '') end--
+  if (end === 0) return ''
+  return lines.slice(Math.max(0, end - count), end).join('\n')
+}
+
 // How many trailing lines the BUSY_INDICATORS (spinner / token-counter)
 // scan inspects. During a live turn the status line renders just above the
 // input box (footer ~3 lines + box ~2 lines + the spinner line + a little
@@ -503,7 +530,7 @@ export function detectsBlockingMenu(pane: string): boolean {
     if (rx.test(pane)) return false
   }
   const lines = pane.split('\n')
-  const footerRegion = lines.slice(-MENU_FOOTER_REGION_LINES).join('\n')
+  const footerRegion = liveTailRegion(lines, MENU_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
   if (IDLE_FOOTER_RX.test(pane)) return false
   return MENU_NAV_RX.test(footerRegion) || MENU_ESC_RX.test(footerRegion)
@@ -556,7 +583,7 @@ export function detectsFirstRunGate(pane: string): FirstRunGateKind | null {
   for (const rx of BUSY_INDICATORS) {
     if (rx.test(busyRegion)) return null
   }
-  const footerRegion = lines.slice(-LIVE_FOOTER_REGION_LINES).join('\n')
+  const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return null
   if (IDLE_FOOTER_RX.test(pane)) return null
   for (const g of FIRST_RUN_GATES) {
@@ -631,7 +658,7 @@ export function detectsPermissionDialog(pane: string): boolean {
   for (const rx of BUSY_INDICATORS) {
     if (rx.test(busyRegion)) return false
   }
-  const footerRegion = lines.slice(-LIVE_FOOTER_REGION_LINES).join('\n')
+  const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
   if (IDLE_FOOTER_RX.test(pane)) return false
   return PERMISSION_AMEND_RX.test(footerRegion)
@@ -645,7 +672,7 @@ export function detectsModelConsentDialog(pane: string): boolean {
   for (const rx of BUSY_INDICATORS) {
     if (rx.test(busyRegion)) return false
   }
-  const footerRegion = lines.slice(-LIVE_FOOTER_REGION_LINES).join('\n')
+  const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
   if (IDLE_FOOTER_RX.test(pane)) return false
   return MODEL_CONSENT_TITLE_RX.test(pane)
@@ -710,7 +737,7 @@ export function detectPaneState(
   // Spinner / token-counter busy signals, scoped to the live bottom region.
   // Whole-pane scanning let a completed turn's stale token-counter line pin
   // an idle session busy (see BUSY_LIVE_REGION_LINES).
-  const busyRegion = paneLines.slice(-BUSY_LIVE_REGION_LINES).join('\n')
+  const busyRegion = liveTailRegion(paneLines, BUSY_LIVE_REGION_LINES)
   for (const rx of BUSY_INDICATORS) {
     if (rx.test(busyRegion)) return 'busy'
   }
@@ -719,7 +746,7 @@ export function detectPaneState(
   // Checking the whole pane would let a scrollback quote of the phrase
   // (e.g. in a watchdog report or a log analysis) permanently classify
   // an idle session as busy.
-  const footerRegion = paneLines.slice(-LIVE_FOOTER_REGION_LINES).join('\n')
+  const footerRegion = liveTailRegion(paneLines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return 'busy'
 
   // Pending-paste placeholder check runs BEFORE the idle-footer gate. The
@@ -947,12 +974,12 @@ export function shouldRetrySubmit(
   // Busy pane: the turn is mid-flight, no retry needed. Region-scoped (same
   // as detectPaneState) so a stale token-counter line does not suppress a
   // legitimate retry on an idle pane.
-  const retryBusyRegion = retryPaneLines.slice(-BUSY_LIVE_REGION_LINES).join('\n')
+  const retryBusyRegion = liveTailRegion(retryPaneLines, BUSY_LIVE_REGION_LINES)
   for (const rx of BUSY_INDICATORS) {
     if (rx.test(retryBusyRegion)) return false
   }
   // Footer-region `esc to interrupt` check (same scoping as detectPaneState).
-  const retryFooterRegion = retryPaneLines.slice(-LIVE_FOOTER_REGION_LINES).join('\n')
+  const retryFooterRegion = liveTailRegion(retryPaneLines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(retryFooterRegion)) return false
 
   // Path 1: placeholder is unambiguous, retry regardless of hint -- and it is
@@ -1226,11 +1253,17 @@ export function stuckInputSignature(pane: string): string | null {
 export function parkedPasteSignature(pane: string): string | null {
   if (!pane || !pane.trim()) return null
   const lines = pane.split('\n')
-  const busyRegion = lines.slice(-BUSY_LIVE_REGION_LINES).join('\n')
+  // ED50E8B5 follow-up (found in Codex review of the upstream port,
+  // 2026-09-10): same shape as detectPaneState's busy window (#1212) -- a
+  // blank tail can push a spinner-only busy signal (no `esc to interrupt` on
+  // the footer at that instant) out of a raw last-N-lines slice, so a
+  // genuinely in-progress paste reads as parked and a caller sends a
+  // recovery Enter into a live turn.
+  const busyRegion = liveTailRegion(lines, BUSY_LIVE_REGION_LINES)
   for (const rx of BUSY_INDICATORS) {
     if (rx.test(busyRegion)) return null
   }
-  const footerRegion = lines.slice(-LIVE_FOOTER_REGION_LINES).join('\n')
+  const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return null
   if (!detectsPastePlaceholder(pane)) return null
   const sig = pastePlaceholderRegion(pane).replace(/\s+/g, ' ').trim()
@@ -1942,6 +1975,11 @@ const CTX_SAT_RX = /100% context used|context (?:is |limit reached|window )?full
 export function paneShowsContextSaturation(capture: string): boolean {
   if (!capture || !capture.trim()) return false
   const lines = capture.split('\n')
-  const footerRegion = lines.slice(-CTX_SAT_FOOTER_REGION_LINES).join('\n')
+  // ED50E8B5 follow-up (found in Codex review of the upstream port,
+  // 2026-09-10): same footer-probe shape as detectsBlockingMenu et al. -- a
+  // blank tail below the banner (short/truncated capture) pushed it out of a
+  // raw last-N-lines window, so a genuinely saturated pane read as idle and
+  // a caller could dispatch work it cannot act on.
+  const footerRegion = liveTailRegion(lines, CTX_SAT_FOOTER_REGION_LINES)
   return CTX_SAT_RX.test(footerRegion)
 }
