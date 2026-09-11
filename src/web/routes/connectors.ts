@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, basename } from 'node:path'
 import { homedir } from 'node:os'
 import { execSync } from 'node:child_process'
-import { PROJECT_ROOT, OLLAMA_URL } from '../../config.js'
+import { PROJECT_ROOT, OLLAMA_URL, MAIN_AGENT_ID } from '../../config.js'
 import { logger } from '../../logger.js'
 import {
   slugify as slugifyMcp,
@@ -10,7 +10,7 @@ import {
   type McpListEntry,
 } from '../../mcp-list-parser.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
-import { readFileOr, AGENTS_BASE_DIR, listAgentNames } from '../agent-config.js'
+import { readFileOr, AGENTS_BASE_DIR, listAgentNames, agentConfigRoot, readAgentRemoteHost } from '../agent-config.js'
 import { getMcpListCache, refreshMcpListCache, purgeFromMcpListCache } from '../mcp-list.js'
 import { readBody, json } from '../http-helpers.js'
 import { shellEscape } from '../sanitize.js'
@@ -101,20 +101,39 @@ function upsertLocalCatalogEntry(entry: any): void {
 // `vault:` ref plus the resolver wrapper -- never the raw value. This is what
 // the install modal already promises ("titkosítva a Vault-ba kerülnek").
 //
+// MULTI-TARGET FIX (2026-09-11, Codex review, kanban 24152d84): addBinding()
+// REPLACES the whole binding (targets array included) on a
+// (vaultSecretId, envVar) key match -- calling this per-target in a loop, as
+// the first cut of the catalog install did, meant installing to A then B
+// left the binding pointing ONLY at B; A's `.mcp.json` still carried the
+// vault-ref wrapper from its own sync, but the NEXT secret rotation/sync
+// would only ever touch B, silently orphaning A. Fixed by reading the
+// EXISTING binding first and writing back the UNION of its targets with the
+// newly-requested ones (deduped by mcpFilePath+serverName), so installing to
+// N targets (in one call or across several calls over time) always leaves
+// all N in the binding.
+//
 // Fail-closed: on any vault/bind/sync error we throw. The server was already
-// registered by `claude mcp add` WITHOUT the secret, so it stands non-functional
-// but leaks nothing; the caller surfaces the error and the user re-adds the
+// written to .mcp.json WITHOUT the secret, so it stands non-functional but
+// leaks nothing; the caller surfaces the error and the user re-adds the
 // secret from the Vault page.
-export function vaultAndBindEnvSecrets(
+export function vaultAndBindEnvSecretsMultiTarget(
   serverName: string,
-  mcpFilePath: string,
+  targets: { mcpFilePath: string; serverName: string }[],
   envSecrets: Record<string, string>,
 ): void {
   for (const [key, value] of Object.entries(envSecrets)) {
     if (!value) continue
     const vaultId = `${slugifyMcp(serverName)}-${key.toLowerCase()}`
     setSecret(vaultId, `${key} (${serverName})`, value)
-    addBinding({ vaultSecretId: vaultId, envVar: key, targets: [{ mcpFilePath, serverName }] })
+    const existing = getBindings().find(b => b.vaultSecretId === vaultId && b.envVar === key)
+    const merged = [...(existing?.targets ?? [])]
+    for (const t of targets) {
+      if (!merged.some(m => m.mcpFilePath === t.mcpFilePath && m.serverName === t.serverName)) {
+        merged.push(t)
+      }
+    }
+    addBinding({ vaultSecretId: vaultId, envVar: key, targets: merged })
     const result = syncSecret(vaultId)
     if (result.errors.length) {
       throw new Error(
@@ -126,8 +145,376 @@ export function vaultAndBindEnvSecrets(
   }
 }
 
+// Thin single-target wrapper -- kept so the existing POST /api/connectors
+// (custom connector add) call site does not need to change its call shape.
+export function vaultAndBindEnvSecrets(
+  serverName: string,
+  mcpFilePath: string,
+  envSecrets: Record<string, string>,
+): void {
+  vaultAndBindEnvSecretsMultiTarget(serverName, [{ mcpFilePath, serverName }], envSecrets)
+}
+
+// Symmetric with the above: on uninstall, remove ONLY this (mcpFilePath,
+// serverName) target from every binding that references it -- never the
+// whole secret/binding, which may still be legitimately bound to OTHER
+// targets or even other servers. A binding left with zero targets after
+// this is deleted outright (nothing left to sync); Codex review (2026-09-11):
+// this does not delete the underlying Vault secret value itself, matching
+// "ne igenyelje mas agent secretjenek torleset" -- only a fully target-less
+// binding record goes away, the secret stays in the Vault for manual reuse.
+function removeVaultBindingTarget(mcpFilePath: string, serverName: string): void {
+  for (const b of getBindings()) {
+    const filtered = b.targets.filter(t => !(t.mcpFilePath === mcpFilePath && t.serverName === serverName))
+    if (filtered.length === b.targets.length) continue
+    if (filtered.length === 0) {
+      removeBinding(b.vaultSecretId, b.envVar)
+    } else {
+      addBinding({ ...b, targets: filtered })
+    }
+  }
+}
+
+// GENSHIN911-CFGROOT (2026-09-11, kanban 24152d84). Resolve which .mcp.json a
+// per-agent catalog install/uninstall should read/write -- main agent ->
+// PROJECT_ROOT/.mcp.json, sub-agent -> agents/<name>/.mcp.json. Reuses the
+// ALREADY-EXISTING agentConfigRoot() (src/web/agent-config.ts), which is the
+// SAME resolver startAgentProcess uses to launch a sub-agent's own session --
+// deliberately not a bespoke path, so "where does this agent's own config
+// live" has exactly one answer across the codebase, not two that could drift.
+//
+// This is the fix for the actual bug (kanban 24152d84): the catalog install
+// route used to run `claude mcp add` from the DASHBOARD SERVER's own process
+// environment, which has no CLAUDE_CONFIG_DIR set (measured directly,
+// 2026-09-11: /proc/<dashboard-pid>/environ) -- so every catalog install
+// silently landed in the operator's shared ~/.claude.json, never in any
+// agent's actual isolated config. Live-reproduced and immediately reverted
+// with `env -i HOME=... PATH=... claude mcp add ...` mimicking the exact
+// dashboard process environment: "File modified: /home/kisss/.claude.json".
+export function targetMcpPath(agentName: string): string {
+  return join(agentConfigRoot(agentName), '.mcp.json')
+}
+
+export type McpServerConfig =
+  | { command: string; args?: string[]; env?: Record<string, string> }
+  | { url: string; transport?: 'sse' | 'http' }
+
+// Validated, side-effect-free: turns a catalog item + user-supplied secret
+// env values into (a) the PLAIN, non-secret server config object that gets
+// written into a target's .mcp.json, and (b) the secret values that must be
+// vault-bound separately (never written in plaintext). Codex review
+// (2026-09-11): replaces the removed `claude mcp add` CLI call's implicit
+// validation with an explicit, narrow schema -- only the two catalog item
+// shapes this function already supported (stdio/local, http|sse/remote) are
+// accepted; anything else throws rather than writing a malformed entry.
+export function buildCatalogServerConfig(
+  item: { type?: string; command?: string; args?: unknown; env?: Record<string, unknown>; url?: string; transport?: string },
+  envData: Record<string, string>,
+): { config: McpServerConfig; secrets: Record<string, string> } {
+  if (item.type === 'local') {
+    if (typeof item.command !== 'string' || !item.command.trim()) {
+      throw new Error('Catalog item is missing a valid command for a local (stdio) MCP server')
+    }
+    // Codex review (2026-09-11): a non-string arg used to be silently
+    // DROPPED -- fail-closed instead, a malformed catalog/local-catalog
+    // entry should be visibly rejected, not quietly install with missing
+    // arguments the server may depend on.
+    let args: string[] = []
+    if (item.args !== undefined) {
+      if (!Array.isArray(item.args) || item.args.some(a => typeof a !== 'string')) {
+        throw new Error('Catalog item args must be an array of strings')
+      }
+      args = item.args as string[]
+    }
+    // Only env keys the catalog itself DECLARES (item.env) are accepted from
+    // the caller -- Codex review: an install-time envData is not a general
+    // "write anything into this config" channel, it exists to fill in
+    // secrets the catalog entry already names. A caller-supplied key not in
+    // item.env is silently dropped (not an error -- the modal only ever
+    // sends keys it rendered inputs for, which come from item.env itself,
+    // so a mismatch here means a stale/hand-crafted request, not a normal
+    // user flow worth hard-failing on).
+    const declaredKeys = new Set(Object.keys(item.env || {}))
+    const userSecrets = Object.fromEntries(
+      Object.entries(envData || {}).filter(
+        ([k, v]) => declaredKeys.has(k) && typeof v === 'string' && v !== '',
+      ),
+    ) as Record<string, string>
+    // Non-empty catalog defaults not overridden by the user stay as plain
+    // config -- same split the removed CLI-based install used.
+    const defaultEnv = Object.fromEntries(
+      Object.entries(item.env || {}).filter(
+        ([k, v]) => typeof v === 'string' && v !== '' && !(k in userSecrets),
+      ),
+    ) as Record<string, string>
+    const config: McpServerConfig = { command: item.command, args }
+    if (Object.keys(defaultEnv).length) (config as { env?: Record<string, string> }).env = defaultEnv
+    return { config, secrets: userSecrets }
+  }
+  if (item.type === 'remote') {
+    if (typeof item.url !== 'string') {
+      throw new Error('Catalog item is missing a URL for a remote MCP server')
+    }
+    let parsedUrl: URL
+    try {
+      parsedUrl = new URL(item.url)
+    } catch {
+      throw new Error(`Catalog item has an invalid URL for a remote MCP server: ${item.url}`)
+    }
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      throw new Error(`Catalog item URL must be http(s) for a remote MCP server, got: ${parsedUrl.protocol}`)
+    }
+    // Codex review (2026-09-11): an unrecognized transport used to be
+    // silently coerced to 'sse' -- fail-closed instead, so a typo'd or
+    // future-transport catalog entry is visibly rejected rather than
+    // silently installed with a transport the item never actually declared.
+    if (item.transport !== undefined && item.transport !== 'sse' && item.transport !== 'http') {
+      throw new Error(`Catalog item has an unsupported transport for a remote MCP server: ${item.transport}`)
+    }
+    const transport = item.transport === 'http' ? 'http' : 'sse'
+    return { config: { url: item.url, transport }, secrets: {} }
+  }
+  throw new Error(`Unsupported catalog item type: ${String(item.type)}`)
+}
+
+// Fail-closed read: only a plain-object file whose mcpServers (if present) is
+// also a plain object is accepted as a base to merge a new server entry
+// into. Codex review (2026-09-11): a malformed/unexpected existing file must
+// refuse rather than silently being overwritten -- this is a config file a
+// human or another tool may also hand-edit.
+function readMcpFileForMerge(mcpFilePath: string): { mcpServers: Record<string, unknown>; [k: string]: unknown } {
+  if (!existsSync(mcpFilePath)) return { mcpServers: {} }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(mcpFilePath, 'utf-8'))
+  } catch (err) {
+    throw new Error(`${mcpFilePath} is not valid JSON -- refusing to overwrite (${(err as Error).message})`)
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${mcpFilePath} does not contain a plain JSON object -- refusing to overwrite`)
+  }
+  const obj = parsed as { mcpServers?: unknown; [k: string]: unknown }
+  if (obj.mcpServers !== undefined
+      && (obj.mcpServers === null || typeof obj.mcpServers !== 'object' || Array.isArray(obj.mcpServers))) {
+    throw new Error(`${mcpFilePath}'s mcpServers is not a plain object -- refusing to overwrite`)
+  }
+  return { ...obj, mcpServers: (obj.mcpServers as Record<string, unknown>) ?? {} }
+}
+
+// Codex review (2026-09-11, 2nd round): atomicWriteFileSync with no explicit
+// mode writes the tmp file (then renamed in place) at the PROCESS UMASK
+// default (typically 0644). A first fix here merely PRESERVED whatever mode
+// the file already had -- but a `.mcp.json` that was already 0644 (it may
+// carry other servers' vault-ref wrappers or hand-managed credentials) would
+// then stay 0644 forever across every install/uninstall. syncSecret's own
+// writes (vault-bindings.ts) always force 0600 for exactly this reason --
+// this file matches that: EVERY catalog install/uninstall write hardens the
+// mode to 0600, tightening a looser existing mode rather than preserving it.
+const CATALOG_MCP_FILE_MODE = 0o600
+
+export interface CatalogTargetResult {
+  agent: string
+  ok: boolean
+  error?: string
+}
+
+// Direct, per-target .mcp.json write -- NOT `claude mcp add` CLI. Sidesteps
+// the CLAUDE_CONFIG_DIR/subprocess-env-inheritance bug entirely: nothing
+// shells out, so the dashboard server process's own environment is
+// irrelevant. Same underlying write mechanism the ALREADY-WORKING
+// POST /api/connectors/:name/assign route uses for per-agent .mcp.json,
+// generalized with a real, validated config builder instead of copying an
+// already-registered connector's config verbatim. One target's failure does
+// not abort the others -- each gets its own result so a partial install is
+// reported accurately, not silently swallowed as a full success or a full
+// failure.
+export function installCatalogItem(
+  item: { id: string; type?: string; command?: string; args?: unknown; env?: Record<string, unknown>; url?: string; transport?: string },
+  targetAgents: string[],
+  envData: Record<string, string>,
+): CatalogTargetResult[] {
+  const { config, secrets } = buildCatalogServerConfig(item, envData)
+  const serverName = item.id
+  const results: CatalogTargetResult[] = []
+  // Collected AFTER each target's own .mcp.json write succeeds -- the secret
+  // binding below is done ONCE, as a union across every target that made it
+  // this far (see vaultAndBindEnvSecretsMultiTarget's own comment for why a
+  // per-target loop there was the actual bug).
+  const writtenTargets: { agent: string; mcpFilePath: string }[] = []
+  for (const agent of targetAgents) {
+    try {
+      const mcpFilePath = targetMcpPath(agent)
+      const mcpConfig = readMcpFileForMerge(mcpFilePath)
+      // Codex review (2026-09-11): no silent overwrite of an existing entry
+      // under this exact server name for this target -- a caller that wants
+      // to reconfigure an already-installed server needs an explicit
+      // update/replace path (not built yet), not a plain re-POST that could
+      // silently drop a hand-tuned config or a different secret binding.
+      if (mcpConfig.mcpServers[serverName] !== undefined) {
+        throw new Error(`'${serverName}' is already configured for '${agent}' -- remove it first, or this call would silently overwrite it`)
+      }
+      mcpConfig.mcpServers[serverName] = config
+      atomicWriteFileSync(mcpFilePath, JSON.stringify(mcpConfig, null, 2), { mode: CATALOG_MCP_FILE_MODE })
+      results.push({ agent, ok: true })
+      writtenTargets.push({ agent, mcpFilePath })
+    } catch (err: any) {
+      results.push({ agent, ok: false, error: err.message || String(err) })
+    }
+  }
+  if (Object.keys(secrets).length && writtenTargets.length) {
+    // Codex review (2026-09-11, 3rd round): a rollback that only undoes THIS
+    // call's own new targets is incomplete when this call's serverName+key
+    // already had a WORKING binding on an existing target (the "+ install
+    // for another agent" case -- same server, a second target, a re-typed
+    // secret value). vaultAndBindEnvSecretsMultiTarget's setSecret() call
+    // OVERWRITES the Vault entry for a given vaultId in place; if a LATER
+    // key in the same call then fails sync, the earlier key's new value has
+    // already silently replaced whatever an already-installed target was
+    // relying on, and the union-write also already re-persisted the merged
+    // binding (existing target's entry included) BEFORE the throw. Snapshot
+    // every (vaultId, envVar) this call is about to touch -- value AND
+    // binding shape -- so a failure can restore the exact pre-call state,
+    // not just this call's own additions.
+    const preCallSecrets = Object.keys(secrets).map(key => {
+      const vaultId = `${slugifyMcp(serverName)}-${key.toLowerCase()}`
+      return {
+        vaultId,
+        key,
+        hadValue: getSecret(vaultId),
+        hadBinding: getBindings().find(b => b.vaultSecretId === vaultId && b.envVar === key) ?? null,
+      }
+    })
+    try {
+      vaultAndBindEnvSecretsMultiTarget(
+        serverName,
+        writtenTargets.map(t => ({ mcpFilePath: t.mcpFilePath, serverName })),
+        secrets,
+      )
+    } catch (err: any) {
+      // Codex review (2026-09-11, 2nd round): the previous version left the
+      // .mcp.json entry in place after a binding failure -- "non-functional
+      // but present". That made the failure UNRECOVERABLE from the UI: the
+      // item now reads as installed (installedAgents includes this target,
+      // its checkbox is disabled), and a retry POST hits the "already
+      // configured" guard above. Roll the write back instead: remove the
+      // server entry this call just added from every affected target's
+      // .mcp.json, and undo any binding-target additions this call made
+      // (removeVaultBindingTarget is exact-match on (mcpFilePath,serverName)
+      // and safe to call even for a target that never made it into a
+      // binding). A subsequent identical install call then behaves exactly
+      // as if this attempt never happened, and is retryable from the UI.
+      const msg = `Secret binding failed, rolled back: ${err.message || err}`
+      for (const t of writtenTargets) {
+        try {
+          const mcpConfig = readMcpFileForMerge(t.mcpFilePath)
+          if (mcpConfig.mcpServers[serverName] !== undefined) {
+            delete mcpConfig.mcpServers[serverName]
+            atomicWriteFileSync(t.mcpFilePath, JSON.stringify(mcpConfig, null, 2), { mode: CATALOG_MCP_FILE_MODE })
+          }
+        } catch { /* best-effort rollback -- the failure is still surfaced via result.error either way */ }
+        removeVaultBindingTarget(t.mcpFilePath, serverName)
+      }
+      // Restore each touched vaultId to its EXACT pre-call state (value and
+      // binding), so an already-installed, previously-working target that
+      // shares this serverName+key is not left silently pointed at a
+      // different (or now-missing) secret. A re-sync afterward reconciles
+      // any surviving target's file back to that restored shape (the
+      // `vault:<id>` reference string itself never changes -- only the
+      // decrypted value and/or the binding's target list might have -- but
+      // re-syncing is cheap and closes the loop defensively).
+      for (const snap of preCallSecrets) {
+        try {
+          if (snap.hadValue !== null) {
+            setSecret(snap.vaultId, `${snap.key} (${serverName})`, snap.hadValue)
+          } else {
+            deleteSecret(snap.vaultId)
+          }
+          if (snap.hadBinding) {
+            addBinding(snap.hadBinding)
+          } else {
+            removeBinding(snap.vaultId, snap.key)
+          }
+          if (snap.hadValue !== null && snap.hadBinding) {
+            syncSecret(snap.vaultId)
+          }
+        } catch { /* best-effort restore -- the failure is still surfaced via result.error either way */ }
+      }
+      for (const r of results) {
+        if (r.ok && writtenTargets.some(t => t.agent === r.agent)) {
+          r.ok = false
+          r.error = msg
+        }
+      }
+    }
+  }
+  return results
+}
+
+// Symmetric with installCatalogItem -- targets the SAME per-agent .mcp.json
+// files, not the global `claude mcp remove` CLI. Codex review (2026-09-11):
+// a targeted install paired with a still-global uninstall would modify the
+// WRONG config on removal, reproducing the exact bug class this whole fix
+// exists to close. Missing file / missing entry is a no-op success (nothing
+// to remove), not an error.
+export function uninstallCatalogItem(itemId: string, targetAgents: string[]): CatalogTargetResult[] {
+  const results: CatalogTargetResult[] = []
+  for (const agent of targetAgents) {
+    try {
+      const mcpFilePath = targetMcpPath(agent)
+      if (existsSync(mcpFilePath)) {
+        const mcpConfig = readMcpFileForMerge(mcpFilePath)
+        if (mcpConfig.mcpServers[itemId] !== undefined) {
+          delete mcpConfig.mcpServers[itemId]
+          atomicWriteFileSync(mcpFilePath, JSON.stringify(mcpConfig, null, 2), { mode: CATALOG_MCP_FILE_MODE })
+        }
+      }
+      // Codex review (2026-09-11): the OLD global-CLI uninstall never
+      // cleaned up Vault bindings either (pre-existing debt), but the new
+      // per-target mechanism actively CREATES multi-target bindings, so
+      // leaving this out here would actively manufacture new orphans on
+      // every uninstall rather than just inheriting old debt. Removes ONLY
+      // this (mcpFilePath, serverName) target from any binding that
+      // references it -- never touches other targets/servers/the secret
+      // value itself; see removeVaultBindingTarget's own comment.
+      removeVaultBindingTarget(mcpFilePath, itemId)
+      results.push({ agent, ok: true })
+    } catch (err: any) {
+      results.push({ agent, ok: false, error: err.message || String(err) })
+    }
+  }
+  return results
+}
+
+// Validate a caller-supplied target agent list: REQUIRED (Codex review,
+// 2026-09-11 -- "kötelező explicit célválasztás, nincs implicit all vagy
+// main"), every entry must be a known local agent (main or a real
+// agents/<name> directory), and remote-configured agents (readAgentRemoteHost
+// truthy) are rejected outright -- a direct local .mcp.json write cannot
+// configure an SSH-remote agent's session, so silently accepting one there
+// would be a confident-looking no-op.
+export function resolveCatalogTargets(requestedAgents: unknown): { targets: string[]; error?: string } {
+  if (!Array.isArray(requestedAgents) || requestedAgents.length === 0) {
+    return { targets: [], error: 'agents (non-empty array of local agent ids) is required -- no implicit default target' }
+  }
+  const known = new Set<string>([MAIN_AGENT_ID, ...listAgentNames()])
+  const targets: string[] = []
+  const seen = new Set<string>()
+  for (const raw of requestedAgents) {
+    if (typeof raw !== 'string' || !known.has(raw)) {
+      return { targets: [], error: `Unknown agent: ${String(raw)}` }
+    }
+    if (raw !== MAIN_AGENT_ID && readAgentRemoteHost(raw)) {
+      return { targets: [], error: `Agent '${raw}' runs on a remote host -- catalog install/uninstall only supports local agents (direct .mcp.json write)` }
+    }
+    if (seen.has(raw)) continue
+    seen.add(raw)
+    targets.push(raw)
+  }
+  return { targets }
+}
+
 export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
-  const { req, res, path, method } = ctx
+  const { req, res, path, method, url } = ctx
 
   // GET /api/connectors -- list every MCP server visible to Claude Code,
   // pulled from the local config files plus the cached `claude mcp list`
@@ -603,6 +990,16 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
       // catalog id (e.g. "gmail-egov" / "gmail-personal" for catalog id "gmail").
       const configuredSlugs = collectConfiguredServerSlugs()
 
+      // installedAgents (2026-09-11, kanban 24152d84): per-agent state for the
+      // NEW direct-.mcp.json install path -- distinct from `installed` above,
+      // which reflects the OLD global CLI-scoped mechanism (mcp-list cache +
+      // PROJECT_ROOT/homedir .mcp.json). An item can be installedAgents=[] and
+      // still installed=true (e.g. only ever added globally via the old path,
+      // or by hand) -- the frontend uses this to pre-check/label which SPECIFIC
+      // agents already have it via the targeted mechanism, not to replace the
+      // broader `installed` flag.
+      const localAgentIds = [MAIN_AGENT_ID, ...listAgentNames()]
+
       const result = catalog.map(item => {
         const itemId = slugifyMcp(String(item.id ?? ''))
         const itemNameSlug = slugifyMcp(String(item.name ?? ''))
@@ -616,11 +1013,18 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
           source = 'local'
           configMatch = true
         }
+        const installedAgents = localAgentIds.filter(agent => {
+          try {
+            const parsed = JSON.parse(readFileOr(targetMcpPath(agent), '{}'))
+            return Boolean(parsed?.mcpServers?.[String(item.id ?? '')])
+          } catch { return false }
+        })
         return {
           ...item,
           installed: source !== undefined,
           installedSource: source,
           configMatch,
+          installedAgents,
         }
       })
 
@@ -642,49 +1046,35 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
 
       const body = await readBody(req)
       let envData: Record<string, string> = {}
+      let requestedAgents: unknown
       try {
         const parsed = JSON.parse(body.toString())
         if (parsed.env) envData = parsed.env
-      } catch { /* no body or invalid json - that's ok */ }
+        requestedAgents = parsed.agents
+      } catch { /* no body or invalid json -- requestedAgents stays undefined, caught below */ }
 
-      const cliName = item.id
+      // 24152d84 fix (2026-09-11): no more `claude mcp add` CLI (dashboard's
+      // own process env, no CLAUDE_CONFIG_DIR -- see targetMcpPath's comment)
+      // and no more implicit target (Codex review: explicit selection only).
+      const { targets, error: targetError } = resolveCatalogTargets(requestedAgents)
+      if (targetError) { json(res, { error: targetError }, 400); return true }
 
-      if (item.type === 'local') {
-        // Values typed into the "API kulcsok megadása" modal are secrets: vault
-        // them so they never hit ~/.claude.json in plaintext (the modal already
-        // promises this). Non-empty catalog defaults are non-secret config and
-        // stay as -e flags.
-        const userSecrets = Object.fromEntries(
-          Object.entries(envData).filter(([, v]) => v !== ''),
-        ) as Record<string, string>
-        const defaultEnv = Object.fromEntries(
-          Object.entries(item.env || {}).filter(([k, v]) => v !== '' && !(k in userSecrets)),
-        ) as Record<string, string>
-        const envFlags = Object.entries(defaultEnv)
-          .map(([k, v]) => `-e ${shellEscape(k)}=${shellEscape(v as string)}`)
-          .join(' ')
-
-        const argsStr = (item.args || []).map((a: string) => shellEscape(a)).join(' ')
-        const cmd = `claude mcp add --scope user ${shellEscape(cliName)} ${envFlags} -- ${shellEscape(item.command)} ${argsStr} 2>&1`
-        execSync(cmd, { timeout: 30000, encoding: 'utf-8' })
-        if (Object.keys(userSecrets).length) {
-          vaultAndBindEnvSecrets(cliName, join(homedir(), '.claude.json'), userSecrets)
-        }
-      } else if (item.type === 'remote') {
-        const url = item.url
-        if (!url) { json(res, { error: 'Remote item has no URL' }, 400); return true }
-        // Respect the catalog item's transport (http/sse) instead of forcing sse,
-        // so one-click remote installs can use streamable-http (e.g. n8n).
-        const transport = item.transport === 'http' ? 'http' : 'sse'
-        execSync(`claude mcp add --transport ${transport} --scope user ${shellEscape(cliName)} ${shellEscape(url)} 2>&1`, { timeout: 30000, encoding: 'utf-8' })
-      }
+      const results = installCatalogItem(item, targets, envData)
+      const failed = results.filter(r => !r.ok)
 
       let message = 'Telepítve'
       if (item.authType === 'oauth' && item.authNote) {
         message = `Telepítve. ${item.authNote}`
       }
+      if (failed.length) {
+        message += ` (sikertelen: ${failed.map(f => `${f.agent} -- ${f.error}`).join('; ')})`
+      }
 
-      json(res, { ok: true, message })
+      if (failed.length === results.length) {
+        json(res, { error: message, results }, 500)
+        return true
+      }
+      json(res, { ok: true, message, results })
     } catch (err: any) {
       logger.error({ err }, 'Failed to install MCP from catalog')
       json(res, { error: err.message || 'Failed to install' }, 500)
@@ -700,16 +1090,28 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
       const item = catalog.find(c => c.id === id)
       if (!item) { json(res, { error: 'Item not found in catalog' }, 404); return true }
 
-      const cliName = item.id
-      try {
-        execSync(`claude mcp remove ${shellEscape(cliName)} -s user 2>&1`, { timeout: 15000 })
-      } catch {
-        try {
-          execSync(`claude mcp remove ${shellEscape(cliName)} -s project 2>&1`, { timeout: 15000 })
-        } catch { /* ignore if not found anywhere */ }
-      }
+      // 24152d84 fix (2026-09-11): symmetric with installCatalogItem -- targets
+      // the SAME per-agent .mcp.json files the (now-removed) global
+      // `claude mcp remove -s user/project` CLI never touched. A comma-separated
+      // query param (not a DELETE body -- proxy/client body support for DELETE
+      // is inconsistent) of agent ids to remove from; explicit, same "no
+      // implicit default" rule as install.
+      const agentsParam = url.searchParams.get('agents') || ''
+      const requestedAgents = agentsParam.split(',').map(s => s.trim()).filter(Boolean)
+      const { targets, error: targetError } = resolveCatalogTargets(requestedAgents)
+      if (targetError) { json(res, { error: targetError }, 400); return true }
 
-      json(res, { ok: true, message: 'Eltávolítva' })
+      const results = uninstallCatalogItem(id, targets)
+      const failed = results.filter(r => !r.ok)
+      let message = 'Eltávolítva'
+      if (failed.length) {
+        message += ` (sikertelen: ${failed.map(f => `${f.agent} -- ${f.error}`).join('; ')})`
+      }
+      if (failed.length === results.length && results.length > 0) {
+        json(res, { error: message, results }, 500)
+        return true
+      }
+      json(res, { ok: true, message, results })
     } catch (err: any) {
       logger.error({ err }, 'Failed to uninstall MCP from catalog')
       json(res, { error: err.message || 'Failed to uninstall' }, 500)

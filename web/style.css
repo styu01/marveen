@@ -5248,6 +5248,23 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   color: var(--danger);
   text-decoration: underline;
 }
+.catalog-install-more-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.catalog-install-more-btn:hover {
+  color: var(--text);
+  border-color: var(--text-muted);
+}
 .catalog-auth-hint {
   font-size: 11px;
   color: var(--text-muted);

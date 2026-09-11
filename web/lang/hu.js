@@ -1285,6 +1285,13 @@ window._i18n.hu = {
 
   // --- Catalog ---
   'connectors.catalog.install_title': '{icon} {name} telepítése',
+  'connectors.catalog.targets_label': 'Melyik agenshez telepítsük?',
+  'connectors.catalog.main_agent': 'fő ágens',
+  'connectors.catalog.no_targets': 'Nincs elérhető agens',
+  'connectors.catalog.already_installed': 'már telepítve',
+  'connectors.catalog.remote_unsupported': 'távoli agens, nem támogatott',
+  'connectors.toast.no_target_selected': 'Válassz legalább egy agenst',
+  'connectors.toast.nothing_to_remove': 'Ez az elem nincs telepítve egyetlen agenshez sem ezzel a móddal',
 
   // --- Kanban label ---
   'kanban.label.remove_btn':     'Címke eltávolítása',
@@ -1652,6 +1659,7 @@ window._i18n.hu = {
   // --- Connectors tooltips ---
   'connectors.tooltip.installed_mcp': 'Bekötve a .mcp.json-ban (a Connectors listán kezelhető)',
   'connectors.tooltip.installed_src': 'Forrás: {src}',
+  'connectors.tooltip.install_more':  'Telepítés másik agensnek',
   'connectors.tooltip.auto_detect':   'A dashboard nem tudja automatikusan detektálni ezt a képességet',
   'connectors.tooltip.global':        'Globálisan elérhető a fő agentnek - nem kell külön hozzárendelni',
 

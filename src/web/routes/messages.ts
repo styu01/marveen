@@ -6,6 +6,7 @@ import {
   closeOtelSpan,
   getPendingBacklogByAgent,
   getWaitingOutboundMessages,
+  getRepliedButUnclosedInboundMessages,
   COMPLETION_REPORT_PREFIX,
   type AgentMessage,
 } from '../../db.js'
@@ -37,11 +38,44 @@ import type { RouteContext } from './types.js'
 //      the sub-agent directories; a plain registry lookup would have suppressed every
 //      notification back to the MAIN agent, which is the case this feature exists for.
 //   3. contents that are themselves completion reports -- breaks ping-pong chains.
+//   4. contents that are themselves a trivial, content-free closing ack -- see
+//      isTrivialClosureAck below.
 export function shouldNotifyDelegator(fromAgent: string, toAgent: string, content: string): boolean {
   if (fromAgent === toAgent) return false
   if (!isKnownAgent(fromAgent)) return false
   if (content.startsWith(COMPLETION_REPORT_PREFIX)) return false
+  if (isTrivialClosureAck(content)) return false
   return true
+}
+
+// SUPHOX318 (2026-09-11, kanban bcbf4511): the [Eredmény]-prefix guard above
+// stops closing an auto-generated report from producing another one, but it
+// does NOT cover the mechanism that actually caused the documented 8-message
+// ping-pong (2026-08-28/29, codex<->bela, msg 1183-1201, traced with direct
+// DB evidence): A closes a real dispatch -> auto-[Eredmény] to B -> B replies
+// a plain, content-free "Rendben." (NOT itself [Eredmény]-prefixed) -> if
+// THAT reply is later closed via PUT done, the guard above does not fire
+// (its content doesn't start with the prefix) -> a NEW [Eredmény] goes back
+// to B -> B acks again -> repeat. This is a narrow, exact-match check
+// (trim + case-fold + full-string, not a prefix match) so a real, substantive
+// reply that merely STARTS with an ack word ("Rendben, de meg ellenorzom
+// X-et is") is never suppressed.
+//
+// Deliberately NOT memory.ts's SKIP_PATTERN: that list serves a different
+// concern (memory-relevance filtering, where e.g. a delegated yes/no
+// decision's "igen"/"nem" IS a meaningful result) and includes casual
+// greeting-openers (hello/szia/hi/hey) that have no place in a closing-ack
+// list for THIS route. A separate, narrow, purpose-built pattern avoids
+// coupling two conceptually distinct filters that happen to share syntax
+// today but could diverge tomorrow.
+// Both accented and unaccented spellings included (agent-authored Hungarian
+// text is not reliably accent-complete) -- igen/nem and any prefix-style
+// match are deliberately EXCLUDED (Codex review, 2026-09-11): a delegated
+// yes/no decision can be a real, substantive result, not a content-free ack.
+const TRIVIAL_CLOSURE_ACK_PATTERN = /^(ok|oké|oke|rendben|köszönöm|koszonom|köszi|koszi|vettem|nyugtázva|nyugtazva)[.!]?$/i
+
+export function isTrivialClosureAck(content: string): boolean {
+  return TRIVIAL_CLOSURE_ACK_PATTERN.test(content.trim())
 }
 
 // Frozen at module load, like the config constant it derives from.
@@ -221,6 +255,26 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // SUPHOX318-B (2026-09-11, kanban 4bf72b27): the OPPOSITE direction from
+  // /waiting-outbound above -- inbound dispatches TO `agent` that `agent` has
+  // already replied to but never formally closed with PUT done/failed. Same
+  // reason this exists as an HTTP route rather than just the db.ts helper:
+  // skills only have curl/bash access. See getRepliedButUnclosedInboundMessages's
+  // doc comment for why the sender/executor direction matters here (closing
+  // the WRONG side's dispatch fabricates a reverse [Eredmény] that appears to
+  // come from someone who never said it).
+  if (path === '/api/messages/closure-debt' && method === 'GET') {
+    const agent = (url.searchParams.get('agent') || '').trim()
+    if (!agent) {
+      json(res, { error: 'agent query parameter is required' }, 400)
+      return true
+    }
+    const limitParam = url.searchParams.get('limit')
+    const limitRaw = limitParam !== null ? parseInt(limitParam, 10) : undefined
+    json(res, getRepliedButUnclosedInboundMessages(agent, limitRaw))
+    return true
+  }
+
   if (path === '/api/messages' && method === 'GET') {
     // An UNKNOWN filter param used to fall through to the global list: a typo,
     // or the plausible-but-wrong `agent_id`, silently returned the fleet's last
@@ -266,11 +320,61 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
   if (msgUpdateMatch && method === 'PUT') {
     const id = parseInt(msgUpdateMatch[1], 10)
     const body = await readBody(req)
-    const { status: newStatus, result } = JSON.parse(body.toString()) as { status: string; result?: string }
+    const parsedBody = JSON.parse(body.toString()) as { status: string; result?: string; silent?: unknown }
+    const { status: newStatus, result } = parsedBody
+    // silent: strictly boolean (2026-09-11, kanban bcbf4511, Codex review) --
+    // a truthy string ("false") must not be accepted as true. Suppresses ONLY
+    // the reverse createAgentMessage notification below; terminal status,
+    // result, delivered_at backfill, and OTel span closure are UNCHANGED. An
+    // explicit, caller-declared alternative to content-sniffing for cases the
+    // isTrivialClosureAck heuristic does not (and should not try to) cover.
+    if (parsedBody.silent !== undefined && typeof parsedBody.silent !== 'boolean') {
+      json(res, { error: 'silent must be a boolean' }, 400)
+      return true
+    }
+    const silentClose = parsedBody.silent === true
+
+    // Idempotent terminal-state guard (2026-09-11, kanban 4bf72b27/bcbf4511,
+    // Codex review): a repeat PUT on an ALREADY-closed message is a common,
+    // harmless caller mistake (retry, double-processing) -- without this it
+    // would re-run markMessageDone/Failed (re-touching completed_at/result,
+    // see the guarded UPDATE in db.ts) AND fire a SECOND reverse [Eredmény]
+    // notification, the same ping-pong mechanism class as a trivial-ack
+    // close, just triggered by a repeat close instead. Checked BEFORE the
+    // write so a repeat close can answer {ok:true, alreadyTerminal:true}
+    // rather than falling through to "not found" once the guarded UPDATE
+    // below returns changes=0 for the same reason.
+    const existing = getAgentMessage(id)
+    if (!existing) {
+      json(res, { error: 'Message not found or invalid status' }, 404)
+      return true
+    }
+    if (existing.status === 'done' || existing.status === 'failed') {
+      json(res, { ok: true, alreadyTerminal: true })
+      return true
+    }
 
     let ok = false
     if (newStatus === 'done') ok = markMessageDone(id, result)
     else if (newStatus === 'failed') ok = markMessageFailed(id, result)
+
+    // TOCTOU close (2026-09-11, Codex review, kanban 4bf72b27/bcbf4511): the
+    // precheck above and the guarded UPDATE are two separate steps, so two
+    // concurrent PUTs can both read existing.status as pending/delivered
+    // before either write lands -- the loser's guarded UPDATE then correctly
+    // affects 0 rows (no double notification, no double completed_at write),
+    // but without this recheck it would fall through to the generic 404
+    // below, breaking the idempotent {ok:true, alreadyTerminal:true}
+    // contract for a message that in fact got closed just fine (by the other
+    // caller). Re-read only on the failure path -- the common, non-racing
+    // case never pays this extra query.
+    if (!ok) {
+      const raced = getAgentMessage(id)
+      if (raced && (raced.status === 'done' || raced.status === 'failed')) {
+        json(res, { ok: true, alreadyTerminal: true })
+        return true
+      }
+    }
 
     if (ok) {
       const done = getAgentMessage(id)
@@ -281,7 +385,9 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       // Notify the delegator: create a reverse message from executor → delegator so
       // they learn the result without polling. See shouldNotifyDelegator for which
       // senders are skipped and why.
-      if (done && shouldNotifyDelegator(done.from_agent, done.to_agent, done.content)) {
+      if (silentClose) {
+        logger.info({ id, silent: true }, 'PUT /api/messages: reverse notification suppressed by caller')
+      } else if (done && shouldNotifyDelegator(done.from_agent, done.to_agent, done.content)) {
         const summary = result ? result.slice(0, 500) : '(nincs eredmény)'
         createAgentMessage(
           done.to_agent,

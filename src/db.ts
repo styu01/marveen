@@ -2473,17 +2473,28 @@ export function claimPendingForAgent(toAgent: string, limit: number): AgentMessa
   return rows.sort((a, b) => (a.created_at - b.created_at) || (a.id - b.id))
 }
 
+// IDEMPOTENCY (2026-09-11, kanban 4bf72b27/bcbf4511, Codex review): both guard
+// the UPDATE to status IN ('pending','delivered') -- a repeat call on an
+// ALREADY-terminal row (done/failed) is now a no-op (changes=0, returns
+// false) instead of silently re-touching completed_at/result. This is the
+// SQL-level enforcement; the PUT /api/messages/:id route additionally
+// pre-checks so it can answer a repeat close with an explicit
+// {ok:true, alreadyTerminal:true} rather than treating changes=0 as "not
+// found". Without this guard, a duplicate/retried PUT done on an
+// already-closed message would fire a SECOND reverse [Eredmény]
+// notification -- the same ping-pong mechanism class as SUPHOX318, just
+// triggered by a repeat close instead of a trivial-ack close.
 export function markMessageDone(id: number, result?: string): boolean {
   const now = Math.floor(Date.now() / 1000)
   // COALESCE: some done-transitions skip the delivered step entirely (e.g. a
   // still-pending row marked done directly via PUT), so backfill delivered_at
   // only when it was never set -- don't clobber a real earlier delivery time.
-  return db.prepare("UPDATE agent_messages SET status = 'done', result = ?, completed_at = ?, delivered_at = COALESCE(delivered_at, ?) WHERE id = ?").run(result ?? null, now, now, id).changes > 0
+  return db.prepare("UPDATE agent_messages SET status = 'done', result = ?, completed_at = ?, delivered_at = COALESCE(delivered_at, ?) WHERE id = ? AND status IN ('pending','delivered')").run(result ?? null, now, now, id).changes > 0
 }
 
 export function markMessageFailed(id: number, error?: string): boolean {
   const now = Math.floor(Date.now() / 1000)
-  return db.prepare("UPDATE agent_messages SET status = 'failed', result = ?, completed_at = ? WHERE id = ?").run(error ?? null, now, id).changes > 0
+  return db.prepare("UPDATE agent_messages SET status = 'failed', result = ?, completed_at = ? WHERE id = ? AND status IN ('pending','delivered')").run(error ?? null, now, id).changes > 0
 }
 
 // Status-guarded fail for the federation bridge's terminal branches: it must
@@ -2729,6 +2740,75 @@ export function getWaitingOutboundMessages(fromAgent: string, limit = 10): Waiti
          AND content NOT LIKE ?
        ORDER BY created_at DESC, id DESC LIMIT ?`,
   ).all(fromAgent, ackPattern, cappedLimit) as WaitingOutboundMessage[]
+}
+
+export interface RepliedButUnclosedInboundMessage {
+  id: number
+  from_agent: string
+  created_at: number
+}
+
+/**
+ * SUPHOX318-B (2026-09-11, kanban 4bf72b27). getWaitingOutboundMessages above
+ * answers "what am I (the sender) still waiting on"; this answers the OPPOSITE
+ * direction -- "what did SOMEONE ELSE send ME that I already replied to, but
+ * never formally closed". This is the correct target for a closure-debt nudge
+ * to the EXECUTOR: PUT /api/messages/:id (status/from_agent/to_agent) is
+ * decided by who the ORIGINAL dispatch's to_agent is (the executor closes
+ * it), not who sent it -- see shouldNotifyDelegator in web/routes/messages.ts,
+ * which builds the reverse [Eredmény] as done.to_agent -> done.from_agent.
+ *
+ * First attempt (rejected on federated Codex review, msg 2250/2251): reusing
+ * getWaitingOutboundMessages(executor) and nudging the SENDER about their own
+ * unclosed dispatches. Wrong direction -- if the SENDER closes their own
+ * dispatch via PUT, the route still treats done.to_agent as the executor and
+ * fabricates a reverse [Eredmény] appearing to come FROM the recipient, who
+ * never said anything. This helper instead lists inbound dispatches TO
+ * `executor` that `executor` has already replied to (a later message FROM
+ * executor back to the original sender exists) but has not yet formally
+ * closed -- so the caller can be told, correctly: "you already answered #id,
+ * if the work is done PUT done on #id yourself".
+ *
+ * The "already replied" signal is advisory only, same reasoning as
+ * getWaitingOutboundMessages' own doc comment and the REJECTED reply-based
+ * GATE-BLOCKING heuristic from kanban 5f49fc94 (two rounds of Codex review
+ * killed that one for fail-open risk when used to unblock a restart gate
+ * automatically). This is a fundamentally different, lower-stakes use: a
+ * NON-blocking, non-automatic reminder surfaced to the executor themselves --
+ * a false positive here costs at most one unnecessary "check this" line, it
+ * can never trigger an incorrect automatic action. That distinction is why
+ * the same underlying correlation is acceptable here but was not acceptable
+ * as a gate condition.
+ *
+ * Excludes: self-addressed (from_agent = to_agent, same Level-1-autonomy
+ * reasoning as getWaitingOutboundMessages), and completion-report content
+ * (closing one auto-generates a reply that would otherwise self-qualify).
+ * The "later reply" match requires an EXACT peer pair in the correlated
+ * direction (r.from_agent = executor, r.to_agent = m.from_agent) with a
+ * created_at + id tiebreak for same-second inserts, same pattern as
+ * getDispatchedPendingStats' rejected-then-reverted attempt -- reused here
+ * deliberately because the consequence class is different (advisory, not
+ * gating).
+ */
+export function getRepliedButUnclosedInboundMessages(
+  executor: string,
+  limit = 10,
+): RepliedButUnclosedInboundMessage[] {
+  const cappedLimit = Number.isFinite(limit) && limit >= 1 ? Math.min(Math.floor(limit), 50) : 10
+  const ackPattern = `${COMPLETION_REPORT_PREFIX}%`
+  return db.prepare(
+    `SELECT m.id, m.from_agent, m.created_at FROM agent_messages m
+       WHERE m.to_agent = ? AND m.from_agent != m.to_agent
+         AND m.status IN ('pending','delivered')
+         AND m.content NOT LIKE ?
+         AND EXISTS (
+           SELECT 1 FROM agent_messages r
+             WHERE r.from_agent = m.to_agent AND r.to_agent = m.from_agent
+               AND (CAST(r.created_at AS INTEGER) > CAST(m.created_at AS INTEGER)
+                    OR (CAST(r.created_at AS INTEGER) = CAST(m.created_at AS INTEGER) AND r.id > m.id))
+         )
+       ORDER BY m.created_at DESC, m.id DESC LIMIT ?`,
+  ).all(executor, ackPattern, cappedLimit) as RepliedButUnclosedInboundMessage[]
 }
 
 // System/automation participants that are not real conversation peers. They are

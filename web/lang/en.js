@@ -1282,6 +1282,13 @@ window._i18n.en = {
 
   // --- Catalog ---
   'connectors.catalog.install_title': '{icon} {name} installation',
+  'connectors.catalog.targets_label': 'Install to which agent?',
+  'connectors.catalog.main_agent': 'main agent',
+  'connectors.catalog.no_targets': 'No agents available',
+  'connectors.catalog.already_installed': 'already installed',
+  'connectors.catalog.remote_unsupported': 'remote agent, not supported',
+  'connectors.toast.no_target_selected': 'Select at least one agent',
+  'connectors.toast.nothing_to_remove': 'This item is not installed for any agent via this mechanism',
 
   // --- Kanban label ---
   'kanban.label.remove_btn':     'Remove label',
@@ -1649,6 +1656,7 @@ window._i18n.en = {
   // --- Connectors tooltips ---
   'connectors.tooltip.installed_mcp': 'Wired in .mcp.json (manageable in Connectors list)',
   'connectors.tooltip.installed_src': 'Source: {src}',
+  'connectors.tooltip.install_more':  'Install for another agent',
   'connectors.tooltip.auto_detect':   'The dashboard cannot automatically detect this capability',
   'connectors.tooltip.global':        'Globally available to the main agent - no separate assignment needed',
 

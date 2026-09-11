@@ -24,6 +24,7 @@ import {
   createAgentMessage,
   getDispatchedPendingStats,
   getWaitingOutboundMessages,
+  getRepliedButUnclosedInboundMessages,
   markMessageDelivered,
   markMessageDone,
   markMessageFailed,
@@ -480,5 +481,83 @@ describe('getWaitingOutboundMessages -- konkret varakozo szalak a handoff-hoz', 
       createAgentMessage('wait-limit-over', 'wait-h', `uzenet ${i}`)
     }
     expect(getWaitingOutboundMessages('wait-limit-over', 200)).toHaveLength(50)
+  })
+})
+
+// SUPHOX318-B (2026-09-11, kanban 4bf72b27): the OPPOSITE direction from
+// getWaitingOutboundMessages -- inbound dispatches the EXECUTOR already
+// replied to but never formally closed. Codex review (msg 2250/2251) caught
+// that the first attempt nudged the WRONG party (the original sender, not
+// the executor) -- see the function's own doc comment for the full
+// reasoning. These tests lock the CORRECT direction down.
+describe('getRepliedButUnclosedInboundMessages -- closure-debt nudge for the executor', () => {
+  it('lists an inbound dispatch the executor already replied to but never closed', () => {
+    const dispatch = createAgentMessage('cd-a', 'cd-exec', 'nezd at ezt a diffet')
+    createAgentMessage('cd-exec', 'cd-a', 'johagyva, mehet tovabb') // executor's own reply
+    const debt = getRepliedButUnclosedInboundMessages('cd-exec')
+    const match = debt.find(d => d.id === dispatch.id)
+    expect(match).toBeDefined()
+    expect(match?.from_agent).toBe('cd-a')
+  })
+
+  it('does NOT list a dispatch with no reply yet from the executor', () => {
+    const dispatch = createAgentMessage('cd-b', 'cd-exec2', 'meg fuggoben levo feladat')
+    const debt = getRepliedButUnclosedInboundMessages('cd-exec2')
+    expect(debt.some(d => d.id === dispatch.id)).toBe(false)
+  })
+
+  it('does NOT list a dispatch already closed via markMessageDone, even with a reply', () => {
+    const dispatch = createAgentMessage('cd-c', 'cd-exec3', 'harmadik feladat')
+    createAgentMessage('cd-exec3', 'cd-c', 'kesz')
+    markMessageDone(dispatch.id, 'lezarva')
+    const debt = getRepliedButUnclosedInboundMessages('cd-exec3')
+    expect(debt.some(d => d.id === dispatch.id)).toBe(false)
+  })
+
+  it('does NOT list a dispatch if the "reply" came from someone else, not the executor', () => {
+    const dispatch = createAgentMessage('cd-d', 'cd-exec4', 'negyedik feladat')
+    createAgentMessage('cd-other', 'cd-d', 'cd-other szolt kozbe, nem cd-exec4') // wrong replier
+    const debt = getRepliedButUnclosedInboundMessages('cd-exec4')
+    expect(debt.some(d => d.id === dispatch.id)).toBe(false)
+  })
+
+  it('does NOT list a dispatch if the executor\'s message to the sender predates the dispatch (old, unrelated reply)', () => {
+    createAgentMessage('cd-exec5', 'cd-e', 'regi, nem kapcsolodo uzenet cd-e-nek') // "reply" comes first
+    const dispatch = createAgentMessage('cd-e', 'cd-exec5', 'uj feladat, a regi uzenet utan')
+    const debt = getRepliedButUnclosedInboundMessages('cd-exec5')
+    expect(debt.some(d => d.id === dispatch.id)).toBe(false)
+  })
+
+  it('does NOT surface the reply/notification-side of the outbound direction (only inbound-to-executor rows count)', () => {
+    // cd-exec6 dispatches to cd-f (outbound for cd-exec6) -- this must never
+    // show up in cd-exec6's OWN closure-debt list, which is about inbound work.
+    createAgentMessage('cd-exec6', 'cd-f', 'cd-exec6 sajat kiadott feladata')
+    createAgentMessage('cd-f', 'cd-exec6', 'cd-f valaszol')
+    const debt = getRepliedButUnclosedInboundMessages('cd-exec6')
+    expect(debt).toHaveLength(0)
+  })
+
+  it('excludes self-addressed messages (from_agent = to_agent)', () => {
+    const self = createAgentMessage('cd-self', 'cd-self', '[FELHÍVÁS] level1 note magamnak')
+    createAgentMessage('cd-self', 'cd-self', '[FELHÍVÁS] masodik note') // would-be "reply" to itself
+    const debt = getRepliedButUnclosedInboundMessages('cd-self')
+    expect(debt.some(d => d.id === self.id)).toBe(false)
+  })
+
+  it('excludes completion-report dispatches even if "replied to"', () => {
+    const report = createAgentMessage('cd-g', 'cd-exec7', `${COMPLETION_REPORT_PREFIX} msg_id:1 status:done\n\nkesz`)
+    createAgentMessage('cd-exec7', 'cd-g', 'Rendben.')
+    const debt = getRepliedButUnclosedInboundMessages('cd-exec7')
+    expect(debt.some(d => d.id === report.id)).toBe(false)
+  })
+
+  it('nem-numerikus/0/negativ limit eseten az alapertelmezett 10-re esik vissza', () => {
+    for (let i = 0; i < 5; i++) {
+      const d = createAgentMessage('cd-limit', 'cd-exec8', `feladat ${i}`)
+      createAgentMessage('cd-exec8', 'cd-limit', `valasz ${i} a ${d.id}-re`)
+    }
+    expect(getRepliedButUnclosedInboundMessages('cd-exec8', 0)).toHaveLength(5)
+    expect(getRepliedButUnclosedInboundMessages('cd-exec8', -5)).toHaveLength(5)
+    expect(getRepliedButUnclosedInboundMessages('cd-exec8', NaN)).toHaveLength(5)
   })
 })

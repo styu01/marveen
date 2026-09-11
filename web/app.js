@@ -918,9 +918,33 @@ document.getElementById('kanbanGroupBy').addEventListener('change', (e) => {
   renderKanban()
 })
 
+// setKanbanProjectFilter: SINGLE state+DOM sync point for the project filter
+// (kanban 71c3a5e8, 2026-09-11, Codex-reviewed). Before this fix there were
+// TWO independent writers of the same logical state -- the dropdown's own
+// change handler, and the Projects page's "Megtekintés a Kanban-on" button
+// (which set BOTH kanbanProjectFilter and sel.value by hand). On a FIRST
+// visit to the Kanban page in a session, the button's `sel.value = project`
+// assignment silently no-ops (the <select> only has the static "Mind"
+// option until populateProjectFilter() has run once to build the rest --
+// a browser cannot select a non-existent <option>), leaving the dropdown
+// LABEL showing "Mind" while the underlying filter was in fact correct
+// (kanbanCardMatchesBaseFilters reads the kanbanProjectFilter VARIABLE, not
+// the DOM, so cards were never actually mis-filtered -- this was a visual/
+// state desync, not a card-leak, per Codex's independent confirmation).
+function setKanbanProjectFilter(value) {
+  kanbanProjectFilter = value
+  const sel = document.getElementById('kanbanProjectFilter')
+  if (sel) sel.value = value
+}
+
 function populateProjectFilter() {
   const sel = document.getElementById('kanbanProjectFilter')
-  const prev = sel.value
+  // Read the STATE variable, not sel.value -- this is the actual fix. The
+  // DOM select may not yet contain the matching <option> at this point
+  // (e.g. right after setKanbanProjectFilter() ran on a page that had never
+  // built the option list before), but kanbanProjectFilter itself is always
+  // authoritative and race-free.
+  const prev = kanbanProjectFilter
   sel.innerHTML = '<option value="">Mind</option>'
   for (const p of kanbanProjects) {
     const opt = document.createElement('option')
@@ -929,7 +953,7 @@ function populateProjectFilter() {
     if (p === prev) opt.selected = true
     sel.appendChild(opt)
   }
-  if (prev && !kanbanProjects.includes(prev)) kanbanProjectFilter = ''
+  if (prev && !kanbanProjects.includes(prev)) setKanbanProjectFilter('')
 }
 
 function renderKanbanColumnChips() {
@@ -965,7 +989,7 @@ function populateProjectSuggestions() {
 }
 
 document.getElementById('kanbanProjectFilter').addEventListener('change', (e) => {
-  kanbanProjectFilter = e.target.value
+  setKanbanProjectFilter(e.target.value)
   renderKanban()
 })
 
@@ -7810,7 +7834,25 @@ function renderCatalog() {
       </div>
       <div class="catalog-card-footer">
         ${item.installed
-          ? `<span class="catalog-install-btn installed" title="${item.configMatch ? t('connectors.tooltip.installed_mcp') : t('connectors.tooltip.installed_src', { src: escapeHtml(item.installedSource || '') })}">Telepítve &#10003;${item.configMatch ? ' (.mcp.json)' : item.installedSource === 'claude.ai' ? ' (claude.ai)' : item.installedSource === 'plugin' ? ' (plugin)' : ''}</span>${(item.installedSource === 'claude.ai' || item.configMatch) ? '' : `<a class="catalog-uninstall-link" data-id="${item.id}">Eltávolítás</a>`}`
+          ? `<span class="catalog-install-btn installed" title="${item.configMatch ? t('connectors.tooltip.installed_mcp') : t('connectors.tooltip.installed_src', { src: escapeHtml(item.installedSource || '') })}">Telepítve &#10003;${item.configMatch ? ' (.mcp.json)' : item.installedSource === 'claude.ai' ? ' (claude.ai)' : item.installedSource === 'plugin' ? ' (plugin)' : ''}</span>${
+              // kanban 24152d84: installedAgents.length>0 means the item was
+              // (also) installed via the NEW, per-agent-targeted mechanism,
+              // whose uninstall is an EXACT id match against each target's
+              // own .mcp.json -- unlike the OLD generic `claude mcp remove
+              // <id>` CLI uninstall, it works correctly even for a
+              // configMatch OR claude.ai-sourced entry, so NEITHER alone
+              // hides this link anymore: only the ABSENCE of any targeted
+              // install (installedAgents empty) does. Codex review
+              // (2026-09-11, 2nd round): the prior version still hid the
+              // link whenever installedSource==='claude.ai', even after the
+              // "+" button above was used to ALSO install it via the new
+              // targeted mechanism -- leaving that new install with no UI
+              // way to remove it again.
+              (item.installedAgents || []).length === 0 && (item.installedSource === 'claude.ai' || item.configMatch)
+                ? ''
+                : `<a class="catalog-uninstall-link" data-id="${item.id}">Eltávolítás</a>`
+            }
+            <button class="catalog-install-more-btn" data-id="${item.id}" title="${escapeHtml(t('connectors.tooltip.install_more'))}">+</button>`
           : `<button class="catalog-install-btn install" data-id="${item.id}">${t('connectors.catalog.install_btn')}</button>${authHint}`
         }
       </div>
@@ -7831,14 +7873,87 @@ function renderCatalog() {
         catalogUninstall(item)
       })
     }
+    // Install-to-another-target button (kanban 24152d84 follow-up): an
+    // already-installed item used to fully hide the install path, so a
+    // partial install (e.g. only the main agent) had no UI way to add
+    // another target without first uninstalling. Always shown once
+    // installed -- harmless if every local agent already has it, the modal
+    // then just shows every checkbox disabled with the reason.
+    const installMoreBtn = card.querySelector('.catalog-install-more-btn')
+    if (installMoreBtn) {
+      installMoreBtn.addEventListener('click', (e) => {
+        e.stopPropagation()
+        openCatalogInstall(item)
+      })
+    }
     grid.appendChild(card)
   }
 }
 
-function openCatalogInstall(item) {
+async function openCatalogInstall(item) {
   catalogInstallTarget = item
   document.getElementById('catalogInstallTitle').textContent = t('connectors.catalog.install_title', { icon: item.icon, name: item.name })
   document.getElementById('catalogInstallDesc').textContent = item.description
+
+  // Target-agent checkboxes (kanban 24152d84, 2026-09-11): the install used
+  // to silently land in the operator's shared ~/.claude.json regardless of
+  // what the user thought they were installing for -- explicit target
+  // selection is now REQUIRED by the backend (POST 400s without an `agents`
+  // array), so the button must build one. Fetched fresh here rather than
+  // relying on the `agents`/`window._marveen` globals loadAgents() sets --
+  // those are only populated if the Agents page happened to load first in
+  // this session (the exact class of page-visit-order bug found in the
+  // Kanban project-filter dropdown, kanban 71c3a5e8).
+  const targetsContainer = document.getElementById('catalogInstallTargets')
+  targetsContainer.innerHTML = `<span class="spinner"></span>`
+  let localAgentTargets = []
+  let mainAgentId = null
+  try {
+    const [agentsRes, marveenRes] = await Promise.all([fetch('/api/agents'), fetch('/api/marveen')])
+    const agentList = agentsRes.ok ? await agentsRes.json() : []
+    const marveen = marveenRes.ok ? await marveenRes.json() : null
+    if (marveen?.agentId) {
+      mainAgentId = marveen.agentId
+      localAgentTargets.push({ id: marveen.agentId, label: `${marveen.name || marveen.agentId} (${t('connectors.catalog.main_agent')})`, remote: false })
+    }
+    for (const a of agentList) {
+      localAgentTargets.push({ id: a.name, label: a.displayName || a.name, remote: Boolean(a.remoteHost) })
+    }
+  } catch (err) {
+    console.error('Failed to load agent list for catalog install targets:', err)
+  }
+  const installedAgents = new Set(item.installedAgents || [])
+  targetsContainer.innerHTML = ''
+  if (!localAgentTargets.length) {
+    targetsContainer.innerHTML = `<span style="color:var(--text-muted);font-size:13px">${t('connectors.catalog.no_targets')}</span>`
+  }
+  for (const target of localAgentTargets) {
+    const row = document.createElement('label')
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer'
+    if (target.remote) row.style.opacity = '0.5'
+    const alreadyInstalled = installedAgents.has(target.id)
+    row.innerHTML = `
+      <input type="checkbox" data-target-agent="${escapeHtml(target.id)}" ${alreadyInstalled ? 'disabled' : ''} ${target.remote ? 'disabled' : ''}>
+      <span>${escapeHtml(target.label)}${alreadyInstalled ? ` -- ${escapeHtml(t('connectors.catalog.already_installed'))}` : ''}${target.remote ? ` -- ${escapeHtml(t('connectors.catalog.remote_unsupported'))}` : ''}</span>
+    `
+    targetsContainer.appendChild(row)
+  }
+  // Pre-check the main agent by default (convenience, per Codex review) --
+  // the user still SEES it checked and must confirm by clicking Install, it
+  // is not submitted silently. Only if the main agent isn't already installed
+  // there -- a disabled checkbox can still be `:checked` for querySelectorAll
+  // purposes (disabled only blocks user interaction and form submission, not
+  // DOM state or CSS matching), so pre-checking an already-installed target
+  // here would resubmit it and trip the "already configured" 409 this
+  // re-open flow exists to avoid. Codex review (2026-09-11, 2nd round):
+  // this USED to key off `localAgentTargets[0]`, which is the main agent
+  // only when /api/marveen succeeded -- if that call failed but /api/agents
+  // didn't, index 0 became the first SUB-agent instead, silently
+  // pre-checking the wrong target. Explicitly require a resolved mainAgentId.
+  if (mainAgentId && !installedAgents.has(mainAgentId)) {
+    const mainCheckbox = targetsContainer.querySelector(`input[data-target-agent="${CSS.escape(mainAgentId)}"]`)
+    if (mainCheckbox) mainCheckbox.checked = true
+  }
 
   const envContainer = document.getElementById('catalogInstallEnvFields')
   envContainer.innerHTML = ''
@@ -7877,6 +7992,15 @@ document.getElementById('catalogInstallBtn').addEventListener('click', async () 
   const item = catalogInstallTarget
   const btn = document.getElementById('catalogInstallBtn')
 
+  // Explicit target agents (kanban 24152d84) -- required, no implicit default.
+  const targetAgents = Array.from(
+    document.querySelectorAll('#catalogInstallTargets input[data-target-agent]:checked'),
+  ).map((el) => el.dataset.targetAgent)
+  if (!targetAgents.length) {
+    showToast(t('connectors.toast.no_target_selected'))
+    return
+  }
+
   // Collect env values
   const envData = {}
   const envInputs = document.querySelectorAll('#catalogInstallEnvFields input[data-env-key]')
@@ -7899,7 +8023,7 @@ document.getElementById('catalogInstallBtn').addEventListener('click', async () 
     const res = await fetch(`/api/mcp-catalog/${encodeURIComponent(item.id)}/install`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ env: envData }),
+      body: JSON.stringify({ env: envData, agents: targetAgents }),
     })
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || 'Hiba')
@@ -7918,9 +8042,24 @@ document.getElementById('catalogInstallBtn').addEventListener('click', async () 
 })
 
 async function catalogUninstall(item) {
+  // Symmetric with the targeted install (kanban 24152d84) -- removes from
+  // every agent this item is currently known to be installed for via the
+  // direct .mcp.json mechanism (installedAgents, from GET /api/mcp-catalog).
+  // Removing from a SPECIFIC subset would need its own picker; simplified
+  // here to "remove everywhere it's installed", the safe default for an
+  // uninstall action -- flagged as a follow-up if per-agent-selective
+  // uninstall is ever needed.
+  const targetAgents = item.installedAgents || []
+  if (!targetAgents.length) {
+    showToast(t('connectors.toast.nothing_to_remove'))
+    return
+  }
   if (!confirm(t('connectors.confirm.remove', { name: item.name }))) return
   try {
-    const res = await fetch(`/api/mcp-catalog/${encodeURIComponent(item.id)}/uninstall`, { method: 'DELETE' })
+    const res = await fetch(
+      `/api/mcp-catalog/${encodeURIComponent(item.id)}/uninstall?agents=${encodeURIComponent(targetAgents.join(','))}`,
+      { method: 'DELETE' },
+    )
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || 'Hiba')
     showToast(data.message || t('connectors.toast.removed'))
@@ -11786,9 +11925,7 @@ document.getElementById('projectsGrid')?.addEventListener('click', async (e) => 
   }
   if (e.target.closest('[data-act="view-kanban"]')) {
     e.preventDefault()
-    kanbanProjectFilter = project
-    const sel = document.getElementById('kanbanProjectFilter')
-    if (sel) sel.value = project
+    setKanbanProjectFilter(project)
     switchPage('kanban')
   }
 })
