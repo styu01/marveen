@@ -81,6 +81,7 @@ vi.mock('node:child_process', () => ({ execFileSync: execFileSyncMock }))
 const { checkAgent } = await import('../web/context-restart-gate-runner.js')
 const { writeGateConfig, readGateRunState } = await import('../web/context-restart-gate-store.js')
 const { readContextTokensFromProjectDir } = await import('../web/active-model.js')
+const { PRE_CLEAR_NOTICE_MS } = await import('../context-restart-gate.js')
 const { hasOpenKanbanCardForAssignee, createAgentMessage, openInboundQuestionMessageId } = await import('../db.js')
 const { archiveTranscriptBeforeContextRestart } = await import('../web/context-restart-transcript-archive.js')
 const { readFleetPauseState } = await import('../web/usage-fleet-pause.js')
@@ -111,7 +112,7 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
     expect(execFileSyncMock).not.toHaveBeenCalled()
   })
 
-  it('enabled config + all-clear inputs: sends a five-minute notice, then /clear via tmux send-keys', async () => {
+  it('enabled config + all-clear inputs: sends a ten-minute notice, then /clear via tmux send-keys', async () => {
     const name = 'worker-enabled'
     // Mirrors exactly what PUT /api/agents/:name/context-restart-gate writes.
     writeGateConfig(name, { enabled: true, thresholdTokens: 100 })
@@ -125,7 +126,14 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
     expect(execFileSyncMock.mock.calls.some(([, args]) => args?.includes('/clear'))).toBe(false)
     expect(readGateRunState(name).preClearNoticeAt).toBe(nowMs)
 
-    await checkAgent(name, nowMs + 5 * 60_000)
+    // The fixed notice must be the approved full ten minutes. At the halfway
+    // point the countdown is still a hard
+    // stop; at the exact boundary the re-check may proceed to /clear.
+    expect(PRE_CLEAR_NOTICE_MS).toBe(10 * 60_000)
+    await checkAgent(name, nowMs + PRE_CLEAR_NOTICE_MS / 2)
+    expect(execFileSyncMock.mock.calls.some(([, args]) => args?.includes('/clear'))).toBe(false)
+
+    await checkAgent(name, nowMs + PRE_CLEAR_NOTICE_MS)
 
     // Crossed the process boundary: the actual send-keys call the runner's
     // 'allow' branch makes, not just an in-process assertion on the store.
@@ -135,7 +143,7 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
     expect(archiveTranscriptBeforeContextRestart).toHaveBeenCalledWith(expect.objectContaining({
       agent: name,
       workingDir: join(SANDBOX, 'agents', name),
-      nowMs: nowMs + 5 * 60_000,
+      nowMs: nowMs + PRE_CLEAR_NOTICE_MS,
     }))
     const firstClearSend = execFileSyncMock.mock.calls.findIndex(([, args]) => args?.includes('/clear'))
     expect(firstClearSend).toBeGreaterThanOrEqual(0)
@@ -145,7 +153,7 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
     // And the run-state round-trips through the real (sandboxed) store, same
     // as the live sweep would leave it for the next tick.
     const runState = readGateRunState(name)
-    expect(runState.lastClearAt).toBe(nowMs + 5 * 60_000)
+    expect(runState.lastClearAt).toBe(nowMs + PRE_CLEAR_NOTICE_MS)
     expect(runState.firstBlockedAt).toBeNull()
     expect(runState.preClearNoticeAt).toBeNull()
   })
@@ -192,7 +200,7 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
       throw new Error('no transcript')
     })
 
-    await checkAgent(name, nowMs + 5 * 60_000)
+    await checkAgent(name, nowMs + PRE_CLEAR_NOTICE_MS)
 
     expect(execFileSyncMock.mock.calls.some(([, args]) => args?.[0] === 'send-keys')).toBe(false)
     expect(readGateRunState(name).lastClearAt).toBeNull()
@@ -225,7 +233,7 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
     expect(readGateRunState(name).preClearNoticeAt).toBe(nowMs)
 
     vi.mocked(hasOpenKanbanCardForAssignee).mockReturnValueOnce(true)
-    await checkAgent(name, nowMs + 5 * 60_000)
+    await checkAgent(name, nowMs + PRE_CLEAR_NOTICE_MS)
     expect(readGateRunState(name).preClearNoticeAt).toBeNull()
     expect(execFileSyncMock.mock.calls.some(([, args]) => args?.includes('/clear'))).toBe(false)
 

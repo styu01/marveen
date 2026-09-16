@@ -511,8 +511,8 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
 
   // A notice is a bounded courtesy, not a new proof of safety. It is sent only
   // while every current fail-closed signal allows a future clear. If a signal
-  // turns blocking during the five-minute window, the notice is discarded so a
-  // later clear gets a fresh, truthful five-minute warning instead of relying
+  // turns blocking during the ten-minute window, the notice is discarded so a
+  // later clear gets a fresh, truthful ten-minute warning instead of relying
   // on an old one.
   let effectiveState = runState
   if (decision.action !== 'allow' && effectiveState.preClearNoticeAt !== null) {

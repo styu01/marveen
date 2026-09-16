@@ -23,8 +23,8 @@ export const DEFAULT_PERSISTENT_BLOCK_ALERT_MS = 2 * 60 * 60 * 1000  // 2 h
 // A short fixed notice gives an otherwise-idle agent a chance to persist a
 // concise warm note without letting a fast-growing context run far past its
 // proactive threshold. There is no trustworthy per-agent token-slope history,
-// so use the conservative end of the approved 5-10 minute range.
-export const PRE_CLEAR_NOTICE_MS = 5 * 60 * 1000
+// so use the full approved 10-minute notice window.
+export const PRE_CLEAR_NOTICE_MS = 10 * 60 * 1000
 
 export interface GateConfig {
   /** Master toggle. Default false (opt-in per agent). */
