@@ -28,6 +28,23 @@ export function projectsDirFor(workingDir: string, configDir?: string, homeDirOv
   return join(base, 'projects', encoded)
 }
 
+/**
+ * Newest Claude Code JSONL transcript for a session, or null when no readable
+ * transcript exists. Shared by usage readers and the context-restart archive
+ * path so both refer to the same on-disk session source.
+ */
+export function latestTranscriptPathForProjectDir(workingDir: string, configDir?: string): string | null {
+  try {
+    const dir = projectsDirFor(workingDir, configDir)
+    if (!existsSync(dir)) return null
+    const jsonls = readdirSync(dir)
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => ({ path: join(dir, f), mtime: statSync(join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime)
+    return jsonls[0]?.path ?? null
+  } catch { return null }
+}
+
 export function readActiveModelFromProjectDir(workingDir: string, sinceUnixSec?: number, configDir?: string): string | null {
   const now = Date.now()
   const cacheKey = `${workingDir}:${sinceUnixSec ?? ''}:${configDir ?? ''}`

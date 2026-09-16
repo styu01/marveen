@@ -30,7 +30,16 @@ vi.mock('../db.js', () => ({
   // try/catch to `false` on every call -- passing, but no longer exercising
   // the real wiring. null = "nothing open", matching the old mock's false.
   openInboundQuestionMessageId: vi.fn(() => null),
+  hasOpenKanbanCardForAssignee: vi.fn(() => false),
   createAgentMessage: vi.fn(),
+}))
+vi.mock('../web/context-restart-transcript-archive.js', () => ({
+  archiveTranscriptBeforeContextRestart: vi.fn(() => ({
+    path: '/cold/archive.txt', sourcePath: '/session.jsonl',
+  })),
+}))
+vi.mock('../web/usage-fleet-pause.js', () => ({
+  readFleetPauseState: vi.fn(() => ({ paused: false })),
 }))
 vi.mock('../web/agent-process.js', () => ({
   agentSessionName: (n: string) => `agent-${n}`,
@@ -72,9 +81,23 @@ vi.mock('node:child_process', () => ({ execFileSync: execFileSyncMock }))
 const { checkAgent } = await import('../web/context-restart-gate-runner.js')
 const { writeGateConfig, readGateRunState } = await import('../web/context-restart-gate-store.js')
 const { readContextTokensFromProjectDir } = await import('../web/active-model.js')
+const { hasOpenKanbanCardForAssignee, createAgentMessage, openInboundQuestionMessageId } = await import('../db.js')
+const { archiveTranscriptBeforeContextRestart } = await import('../web/context-restart-transcript-archive.js')
+const { readFleetPauseState } = await import('../web/usage-fleet-pause.js')
 
 beforeEach(() => {
   execFileSyncMock.mockClear()
+  vi.mocked(hasOpenKanbanCardForAssignee).mockReset()
+  vi.mocked(hasOpenKanbanCardForAssignee).mockReturnValue(false)
+  vi.mocked(openInboundQuestionMessageId).mockReset()
+  vi.mocked(openInboundQuestionMessageId).mockReturnValue(null)
+  vi.mocked(createAgentMessage).mockClear()
+  vi.mocked(archiveTranscriptBeforeContextRestart).mockReset()
+  vi.mocked(archiveTranscriptBeforeContextRestart).mockReturnValue({
+    path: '/cold/archive.txt', sourcePath: '/session.jsonl',
+  })
+  vi.mocked(readFleetPauseState).mockReset()
+  vi.mocked(readFleetPauseState).mockReturnValue({ paused: false })
 })
 afterAll(() => rmSync(SANDBOX, { recursive: true, force: true }))
 
@@ -88,26 +111,43 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
     expect(execFileSyncMock).not.toHaveBeenCalled()
   })
 
-  it('enabled config + all-clear inputs: checkAgent sends /clear via tmux send-keys', async () => {
+  it('enabled config + all-clear inputs: sends a five-minute notice, then /clear via tmux send-keys', async () => {
     const name = 'worker-enabled'
     // Mirrors exactly what PUT /api/agents/:name/context-restart-gate writes.
     writeGateConfig(name, { enabled: true, thresholdTokens: 100 })
-    vi.mocked(readContextTokensFromProjectDir).mockReturnValueOnce(500) // >= thresholdTokens
+    vi.mocked(readContextTokensFromProjectDir).mockReturnValue(500) // >= thresholdTokens
 
     const nowMs = Date.now()
     await checkAgent(name, nowMs)
+
+    // The first all-clear sweep must never clear immediately: it gives the
+    // agent a bounded opportunity to write a concise warm state note.
+    expect(execFileSyncMock.mock.calls.some(([, args]) => args?.includes('/clear'))).toBe(false)
+    expect(readGateRunState(name).preClearNoticeAt).toBe(nowMs)
+
+    await checkAgent(name, nowMs + 5 * 60_000)
 
     // Crossed the process boundary: the actual send-keys call the runner's
     // 'allow' branch makes, not just an in-process assertion on the store.
     const sendKeysCalls = execFileSyncMock.mock.calls.filter(([, args]) => args?.[0] === 'send-keys')
     expect(sendKeysCalls.length).toBeGreaterThan(0)
     expect(sendKeysCalls.some(([, args]) => args?.includes('/clear'))).toBe(true)
+    expect(archiveTranscriptBeforeContextRestart).toHaveBeenCalledWith(expect.objectContaining({
+      agent: name,
+      workingDir: join(SANDBOX, 'agents', name),
+      nowMs: nowMs + 5 * 60_000,
+    }))
+    const firstClearSend = execFileSyncMock.mock.calls.findIndex(([, args]) => args?.includes('/clear'))
+    expect(firstClearSend).toBeGreaterThanOrEqual(0)
+    expect(vi.mocked(archiveTranscriptBeforeContextRestart).mock.invocationCallOrder[0])
+      .toBeLessThan(execFileSyncMock.mock.invocationCallOrder[firstClearSend])
 
     // And the run-state round-trips through the real (sandboxed) store, same
     // as the live sweep would leave it for the next tick.
     const runState = readGateRunState(name)
-    expect(runState.lastClearAt).toBe(nowMs)
+    expect(runState.lastClearAt).toBe(nowMs + 5 * 60_000)
     expect(runState.firstBlockedAt).toBeNull()
+    expect(runState.preClearNoticeAt).toBeNull()
   })
 
   it('disabled config for a second agent still never touches tmux, even after the enabled one fired', async () => {
@@ -116,5 +156,80 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
     await checkAgent('worker-still-disabled', Date.now())
 
     expect(execFileSyncMock).not.toHaveBeenCalled()
+  })
+
+  it('assigned unfinished Kanban work blocks /clear even with every process-level signal clear', async () => {
+    const name = 'worker-kanban-open'
+    writeGateConfig(name, { enabled: true, thresholdTokens: 100 })
+    vi.mocked(readContextTokensFromProjectDir).mockReturnValueOnce(500)
+    vi.mocked(hasOpenKanbanCardForAssignee).mockReturnValueOnce(true)
+
+    await checkAgent(name, Date.now())
+
+    expect(archiveTranscriptBeforeContextRestart).not.toHaveBeenCalled()
+    expect(execFileSyncMock.mock.calls.some(([, args]) => args?.[0] === 'send-keys')).toBe(false)
+  })
+
+  it('fails closed when the Kanban query itself throws', async () => {
+    const name = 'worker-kanban-unmeasurable'
+    writeGateConfig(name, { enabled: true, thresholdTokens: 100 })
+    vi.mocked(readContextTokensFromProjectDir).mockReturnValueOnce(500)
+    vi.mocked(hasOpenKanbanCardForAssignee).mockImplementationOnce(() => { throw new Error('db unavailable') })
+
+    await checkAgent(name, Date.now())
+
+    expect(archiveTranscriptBeforeContextRestart).not.toHaveBeenCalled()
+    expect(execFileSyncMock.mock.calls.some(([, args]) => args?.[0] === 'send-keys')).toBe(false)
+  })
+
+  it('never sends /clear when the mandatory pre-clear transcript archive fails', async () => {
+    const name = 'worker-archive-failed'
+    writeGateConfig(name, { enabled: true, thresholdTokens: 100 })
+    vi.mocked(readContextTokensFromProjectDir).mockReturnValue(500)
+    const nowMs = Date.now()
+    await checkAgent(name, nowMs) // pre-clear notice
+    vi.mocked(archiveTranscriptBeforeContextRestart).mockImplementationOnce(() => {
+      throw new Error('no transcript')
+    })
+
+    await checkAgent(name, nowMs + 5 * 60_000)
+
+    expect(execFileSyncMock.mock.calls.some(([, args]) => args?.[0] === 'send-keys')).toBe(false)
+    expect(readGateRunState(name).lastClearAt).toBeNull()
+    expect(readGateRunState(name).preClearNoticeAt).toBeNull()
+
+    await checkAgent(name, nowMs + 6 * 60_000)
+    expect(readGateRunState(name).preClearNoticeAt).toBe(nowMs + 6 * 60_000)
+  })
+
+  it('does not send a pre-clear notice or clear while the shared usage fleet pause is active', async () => {
+    const name = 'worker-usage-paused'
+    writeGateConfig(name, { enabled: true, thresholdTokens: 100 })
+    vi.mocked(readContextTokensFromProjectDir).mockReturnValueOnce(500)
+    vi.mocked(readFleetPauseState).mockReturnValueOnce({ paused: true, metric: 'five_hour', percent: 91 })
+
+    await checkAgent(name, Date.now())
+
+    expect(createAgentMessage).not.toHaveBeenCalled()
+    expect(archiveTranscriptBeforeContextRestart).not.toHaveBeenCalled()
+    expect(execFileSyncMock.mock.calls.some(([, args]) => args?.[0] === 'send-keys')).toBe(false)
+    expect(readGateRunState(name).preClearNoticeAt).toBeNull()
+  })
+
+  it('invalidates an old notice when new Kanban work appears, requiring a fresh notice after it clears', async () => {
+    const name = 'worker-notice-invalidated'
+    writeGateConfig(name, { enabled: true, thresholdTokens: 100 })
+    vi.mocked(readContextTokensFromProjectDir).mockReturnValue(500)
+    const nowMs = Date.now()
+    await checkAgent(name, nowMs)
+    expect(readGateRunState(name).preClearNoticeAt).toBe(nowMs)
+
+    vi.mocked(hasOpenKanbanCardForAssignee).mockReturnValueOnce(true)
+    await checkAgent(name, nowMs + 5 * 60_000)
+    expect(readGateRunState(name).preClearNoticeAt).toBeNull()
+    expect(execFileSyncMock.mock.calls.some(([, args]) => args?.includes('/clear'))).toBe(false)
+
+    await checkAgent(name, nowMs + 6 * 60_000)
+    expect(readGateRunState(name).preClearNoticeAt).toBe(nowMs + 6 * 60_000)
   })
 })

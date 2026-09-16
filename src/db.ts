@@ -2648,6 +2648,23 @@ export function openInboundQuestionMessageId(agentId: string): string | null {
 }
 
 /**
+ * Fail-closed context-restart-gate signal: an agent with assigned work that
+ * is neither done nor archived must not receive an automatic /clear.
+ *
+ * Keep this predicate deliberately narrower than the dashboard's board
+ * queries: the gate needs only a yes/no safety interlock, and an archived card
+ * is historical record rather than live work even if its old status was never
+ * changed to `done` before archival.
+ */
+export const OPEN_KANBAN_CARD_FOR_ASSIGNEE_SQL = `SELECT 1 FROM kanban_cards
+  WHERE assignee = ? AND status != 'done' AND archived_at IS NULL
+  LIMIT 1`
+
+export function hasOpenKanbanCardForAssignee(assignee: string): boolean {
+  return !!db.prepare(OPEN_KANBAN_CARD_FOR_ASSIGNEE_SQL).get(assignee)
+}
+
+/**
  * True when the agent's last inbound channel message has no later outbound
  * (unanswered question). Used by the context-restart gate.
  */
@@ -3978,4 +3995,3 @@ export function listOtelTraces(limit = 50): OtelTraceSummary[] {
     LIMIT ?
   `).all(limit) as OtelTraceSummary[]
 }
-

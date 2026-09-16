@@ -34,6 +34,8 @@ const CLEAR_INPUTS: GateInputs = {
   hasChildProcesses:    false,
   hasOpenQuestion:      false,
   hasLiveTaskState:     false,
+  hasOpenKanbanCard:    false,
+  fleetUsagePaused:     false,
 }
 const ENABLED: GateConfig = { ...DEFAULT_GATE_CONFIG, enabled: true }
 
@@ -182,6 +184,14 @@ describe('decideGate -- hard-guard interlock', () => {
   })
 })
 
+describe('decideGate -- fleet usage pause', () => {
+  it('blocks while the existing 90%+ fleet usage pause is active', () => {
+    const d = decide({ fleetUsagePaused: true })
+    expect(d.action).toBe('block')
+    expect(d.reason).toMatch(/usage-fleet-paused/)
+  })
+})
+
 describe('decideGate -- pane guards', () => {
   it('blocks when pane is null (fail-closed)', () => {
     const d = decide({ paneState: null })
@@ -271,6 +281,18 @@ describe('decideGate -- live task state', () => {
     const d = decide({ hasLiveTaskState: true })
     expect(d.action).toBe('block')
     expect(d.reason).toMatch(/live-task-state/)
+  })
+})
+
+describe('decideGate -- assigned Kanban work', () => {
+  it('blocks when an assigned non-done, non-archived Kanban card exists', () => {
+    const d = decide({ hasOpenKanbanCard: true })
+    expect(d.action).toBe('block')
+    expect(d.reason).toMatch(/open-kanban-card/)
+  })
+
+  it('allows when no assigned open Kanban card exists', () => {
+    expect(decide({ hasOpenKanbanCard: false }).action).toBe('allow')
   })
 })
 

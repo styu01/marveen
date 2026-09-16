@@ -12,14 +12,18 @@ import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { withSessionSendLock } from './session-send-lock.js'
 import { getHardGuardPhase } from './context-guard-runner.js'
 import { readGateConfig, readGateRunState, writeGateRunState } from './context-restart-gate-store.js'
+import { readFleetPauseState } from './usage-fleet-pause.js'
 import {
   getDispatchedPendingStats,
   openInboundQuestionMessageId,
+  hasOpenKanbanCardForAssignee,
   createAgentMessage,
 } from '../db.js'
+import { archiveTranscriptBeforeContextRestart } from './context-restart-transcript-archive.js'
 import {
   decideGate,
   nextBlockClock,
+  PRE_CLEAR_NOTICE_MS,
   type GateInputs,
 } from '../context-restart-gate.js'
 
@@ -30,8 +34,10 @@ import {
 // This complements the hard context-guard (context-guard-runner.ts), which
 // acts at 90%/97% of the context window via hard process restarts. The soft
 // gate acts much earlier (default 400k tokens) via /clear -- the SessionStart
-// hooks (ledger-replay, taskstate-replay, daily-log-digest) then inject a rich
-// context snapshot into the fresh session automatically.
+// hooks (ledger-replay and taskstate-replay) then inject their normal context
+// snapshot into the fresh session automatically. Separately, every actual
+// gate clear exports a full cold-tier research archive immediately beforehand;
+// that archive is never a continuity/replay input.
 //
 // The runner starts 3 minutes after dashboard boot (offset from context-guard's
 // 4.5 min so the two sweeps do not fire simultaneously) and then sweeps on each
@@ -454,6 +460,19 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
 
   const liveTaskState = hasLiveTaskStateFile(name, nowMs)
 
+  // One shared, already-enforced 90%+ usage state. A pause means no agent can
+  // process a pre-clear warning, so treat it as another local fail-closed gate
+  // condition and do not send a pointless warning until it clears.
+  const fleetPause = readFleetPauseState()
+
+  // An assigned card is work even when the pane happens to look idle. Query
+  // failures are deliberately converted to "open": a missing safety signal
+  // must never become permission to /clear.
+  const openKanbanCard = (() => {
+    try { return hasOpenKanbanCardForAssignee(name) }
+    catch { return null }
+  })()
+
   const mcpPatterns = getMcpJsonPatterns(workingDir)
   const childProcesses = (() => {
     try { return hasLiveChildProcesses(session, mcpPatterns) }
@@ -464,6 +483,9 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
   // if there are pending messages (count=1). Log the failure.
   if (dispatchedStats === null) {
     logger.warn({ agent: name }, 'context-restart-gate: dispatched-stats query failed (fail-closed)')
+  }
+  if (openKanbanCard === null) {
+    logger.warn({ agent: name }, 'context-restart-gate: open-kanban-card query failed (fail-closed)')
   }
 
   const inputs: GateInputs = {
@@ -477,36 +499,90 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
     hasChildProcesses:      childProcesses,
     hasOpenQuestion:        openQuestion,
     hasLiveTaskState:       liveTaskState,
+    hasOpenKanbanCard:      openKanbanCard === null ? true : openKanbanCard,
+    fleetUsagePaused:       fleetPause.paused,
   }
 
   const runState = readGateRunState(name)
   const decision = decideGate(inputs, cfg, runState.firstBlockedAt)
 
   logger.debug({ agent: name, action: decision.action, reason: decision.reason,
-    contextTokens, paneState, hardGuardPhase }, 'context-restart-gate: decision')
+    contextTokens, paneState, hardGuardPhase, fleetUsagePaused: fleetPause.paused }, 'context-restart-gate: decision')
+
+  // A notice is a bounded courtesy, not a new proof of safety. It is sent only
+  // while every current fail-closed signal allows a future clear. If a signal
+  // turns blocking during the five-minute window, the notice is discarded so a
+  // later clear gets a fresh, truthful five-minute warning instead of relying
+  // on an old one.
+  let effectiveState = runState
+  if (decision.action !== 'allow' && effectiveState.preClearNoticeAt !== null) {
+    effectiveState = { ...effectiveState, preClearNoticeAt: null }
+    writeGateRunState(name, effectiveState)
+  }
 
   switch (decision.action) {
     case 'allow': {
+      if (effectiveState.preClearNoticeAt === null) {
+        try {
+          createAgentMessage(
+            MAIN_AGENT_ID,
+            name,
+            `[CONTEXT-RESTART-GATE] ${Math.round(PRE_CLEAR_NOTICE_MS / 60_000)} percen belül automatikus context-clear várható. Ha van folyamatban levő munkád, írj magadnak rövid állapotjegyzetet a warm memóriába MOST. A clear csak akkor történik meg, ha addig is minden biztonsági kapufeltétel tiszta marad.`,
+            'context-restart-gate pre-clear notice',
+          )
+          writeGateRunState(name, { ...effectiveState, preClearNoticeAt: nowMs })
+          logger.info({ agent: name, waitMs: PRE_CLEAR_NOTICE_MS },
+            'context-restart-gate: pre-clear notice sent; waiting before re-check')
+        } catch (err) {
+          // No notice => no clear. The next sweep can retry the bounded notice
+          // instead of silently treating a failed message write as delivered.
+          logger.warn({ err, agent: name }, 'context-restart-gate: pre-clear notice failed; clear deferred')
+        }
+        break
+      }
+
+      const noticeAgeMs = nowMs - effectiveState.preClearNoticeAt
+      if (noticeAgeMs < PRE_CLEAR_NOTICE_MS) {
+        logger.debug({ agent: name, noticeAgeMs, waitMs: PRE_CLEAR_NOTICE_MS },
+          'context-restart-gate: pre-clear notice countdown active')
+        break
+      }
+
       if (decision.noteStaleOutbound) {
         logger.info({ agent: name },
           'context-restart-gate: opening despite stale dispatched messages (beyond staleCutoffMs)')
       }
-      // Send /clear via the send lane. A pane that is truly idle should accept
-      // it immediately; the SessionStart hooks fire on the next boot and inject
-      // the fresh context snapshot.
+      // Hold the send lane across BOTH the mandatory archive and /clear. If
+      // archive creation fails, the callback throws before either send-keys
+      // call, so no actual clear can occur without its cold-tier transcript.
+      // This archive is an emergency/research record only; normal daily
+      // continuity remains the independent ledger/task-state SessionStart
+      // replay and warm handoff mechanisms.
       try {
         await withSessionSendLock(session, null, 'deliver', async () => {
+          const archive = archiveTranscriptBeforeContextRestart({
+            agent: name,
+            workingDir,
+            configDir: configDirFor(name),
+            nowMs,
+          })
+          logger.info({ agent: name, archive: archive.path, source: archive.sourcePath },
+            'context-restart-gate: cold-tier transcript archive created before /clear')
           execFileSync(TMUX, ['send-keys', '-t', session, '-l', '/clear'], { timeout: 5000 })
           execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
         })
         logger.info({ agent: name, contextTokens }, 'context-restart-gate: /clear sent')
         writeGateRunState(name, {
-          ...runState,
+          ...effectiveState,
           firstBlockedAt: null,
           lastClearAt: nowMs,
+          preClearNoticeAt: null,
         })
       } catch (err) {
-        logger.warn({ err, agent: name }, 'context-restart-gate: /clear send failed')
+        // The old warning may now be arbitrarily stale. Require a new bounded
+        // notice before any retry, whether the archive or send-keys failed.
+        writeGateRunState(name, { ...effectiveState, preClearNoticeAt: null })
+        logger.warn({ err, agent: name }, 'context-restart-gate: archive or /clear send failed; clear not confirmed')
       }
       break
     }
@@ -514,11 +590,11 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
     case 'block-alert': {
       // Continuous blocking for >= persistentBlockAlertMs. Alert bigme, but
       // only once per persistentBlockAlertMs to avoid message spam.
-      const alertDue = runState.lastAlertAt === null
-        || nowMs - runState.lastAlertAt >= cfg.persistentBlockAlertMs
+      const alertDue = effectiveState.lastAlertAt === null
+        || nowMs - effectiveState.lastAlertAt >= cfg.persistentBlockAlertMs
       if (alertDue) {
-        const blockedSinceMin = runState.firstBlockedAt !== null
-          ? Math.round((nowMs - runState.firstBlockedAt) / 60_000)
+        const blockedSinceMin = effectiveState.firstBlockedAt !== null
+          ? Math.round((nowMs - effectiveState.firstBlockedAt) / 60_000)
           : '?'
         try {
           // When the block reason is child processes, include their args so
@@ -539,8 +615,8 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
           logger.warn({ agent: name, reason: decision.reason, blockedSinceMin },
             'context-restart-gate: persistent-block alert sent')
           writeGateRunState(name, {
-            ...runState,
-            firstBlockedAt: runState.firstBlockedAt ?? nowMs,
+            ...effectiveState,
+            firstBlockedAt: effectiveState.firstBlockedAt ?? nowMs,
             lastAlertAt: nowMs,
           })
         } catch (alertErr) {
@@ -553,10 +629,10 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
     case 'block': {
       // Advance (or clear) the blocking-streak clock; see nextBlockClock.
       const firstBlockedAt = nextBlockClock(
-        runState.firstBlockedAt, inputs.contextTokens, cfg.thresholdTokens, nowMs,
+        effectiveState.firstBlockedAt, inputs.contextTokens, cfg.thresholdTokens, nowMs,
       )
-      if (firstBlockedAt !== runState.firstBlockedAt) {
-        writeGateRunState(name, { ...runState, firstBlockedAt })
+      if (firstBlockedAt !== effectiveState.firstBlockedAt) {
+        writeGateRunState(name, { ...effectiveState, firstBlockedAt, preClearNoticeAt: null })
       }
       break
     }

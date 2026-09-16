@@ -42,12 +42,15 @@ export interface GateRunState {
   lastAlertAt: number | null
   /** Epoch ms when the last /clear was successfully sent. */
   lastClearAt: number | null
+  /** Epoch ms when the current proactive pre-clear notice was delivered. */
+  preClearNoticeAt: number | null
 }
 
 const EMPTY_STATE: GateRunState = {
   firstBlockedAt: null,
   lastAlertAt: null,
   lastClearAt: null,
+  preClearNoticeAt: null,
 }
 
 function readStateRaw(): Record<string, unknown> {
@@ -65,6 +68,7 @@ function normalizeState(raw: unknown): GateRunState {
     firstBlockedAt: msOrNull(o.firstBlockedAt),
     lastAlertAt:    msOrNull(o.lastAlertAt),
     lastClearAt:    msOrNull(o.lastClearAt),
+    preClearNoticeAt: msOrNull(o.preClearNoticeAt),
   }
 }
 

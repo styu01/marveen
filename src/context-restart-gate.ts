@@ -1,11 +1,11 @@
 // Pure logic for the proactive context-restart gate.
 //
-// The ledger-replay, taskstate-replay, and daily-log-digest SessionStart hooks
-// can inject a rich context snapshot into every fresh session -- but only when
-// the session STARTS. This gate decides when a /clear (soft restart via the
-// send lane) is appropriate so those hooks carry the agent forward cheaply,
-// before the context grows deep enough that the in-TUI auto-compact has to do
-// it the hard (expensive, lossy) way.
+// The ledger-replay and taskstate-replay SessionStart hooks can inject a rich
+// context snapshot into a fresh session -- but only when the session STARTS.
+// This gate decides when a /clear (soft restart via the send lane) is
+// appropriate so those hooks carry the agent forward cheaply, before the
+// context grows deep enough that the in-TUI auto-compact has to do it the hard
+// (expensive, lossy) way.
 //
 // The trigger is simple: context >= thresholdTokens.
 // The hard part is the GATE: a /clear mid-task cuts work in flight, and that is
@@ -20,6 +20,11 @@ export const DEFAULT_THRESHOLD_TOKENS = 400_000
 export const DEFAULT_STALE_CUTOFF_MS  = 2 * 60 * 60 * 1000   // 2 h
 export const DEFAULT_RETRY_INTERVAL_MS = 5 * 60 * 1000        // 5 min
 export const DEFAULT_PERSISTENT_BLOCK_ALERT_MS = 2 * 60 * 60 * 1000  // 2 h
+// A short fixed notice gives an otherwise-idle agent a chance to persist a
+// concise warm note without letting a fast-growing context run far past its
+// proactive threshold. There is no trustworthy per-agent token-slope history,
+// so use the conservative end of the approved 5-10 minute range.
+export const PRE_CLEAR_NOTICE_MS = 5 * 60 * 1000
 
 export interface GateConfig {
   /** Master toggle. Default false (opt-in per agent). */
@@ -119,6 +124,17 @@ export interface GateInputs {
    * non-empty nextAction -- the agent has an in-flight structured task.
    */
   hasLiveTaskState: boolean
+
+  /**
+   * An assigned Kanban card that is neither `done` nor archived exists.
+   * This is an independent live-work signal: an agent can look idle and have
+   * no child process while still owning a planned/waiting/in-progress card.
+   * The runner turns a failed DB query into true, preserving fail-closed.
+   */
+  hasOpenKanbanCard: boolean
+
+  /** Fleet-wide 90%+ usage pause is active: never clear while the agent cannot process the pre-clear notice. */
+  fleetUsagePaused: boolean
 }
 
 export type GateAction = 'allow' | 'block' | 'block-alert'
@@ -171,6 +187,14 @@ export function decideGate(
     return block(firstBlockedAt, inputs.nowMs, cfg, `hard-guard-armed (phase: ${inputs.hardGuardPhase})`)
   }
 
+  // A fleet-wide quota pause means the agent cannot usefully process either a
+  // new pre-clear notice or the freshly-cleared session. Wait for the existing
+  // usage-monitor pause state to clear; it is an additional gate condition,
+  // never a replacement for the local live-work signals below.
+  if (inputs.fleetUsagePaused) {
+    return block(firstBlockedAt, inputs.nowMs, cfg, 'usage-fleet-paused (90%+ quota pause active)')
+  }
+
   // ---- Gate conditions (FAIL-CLOSED) ----------------------------------------
 
   // Pane guard: anything that is not a confirmed idle state blocks.
@@ -215,6 +239,13 @@ export function decideGate(
   // Structured in-flight task state.
   if (inputs.hasLiveTaskState) {
     return block(firstBlockedAt, inputs.nowMs, cfg, 'live-task-state (nextAction set, not consumed)')
+  }
+
+  // Assigned, unfinished Kanban work is a separate source of truth from the
+  // process-level checks above. In particular, a briefly idle pane does not
+  // mean a planned/waiting card is safe to abandon.
+  if (inputs.hasOpenKanbanCard) {
+    return block(firstBlockedAt, inputs.nowMs, cfg, 'open-kanban-card (active non-archived assigned work)')
   }
 
   // All gate conditions clear.
