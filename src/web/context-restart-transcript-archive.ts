@@ -1,6 +1,7 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
+import { logger } from '../logger.js'
 import { latestTranscriptPathForProjectDir } from './active-model.js'
 
 // Cold-tier filesystem archive for the proactive context-restart gate.
@@ -13,6 +14,77 @@ import { latestTranscriptPathForProjectDir } from './active-model.js'
 export const CONTEXT_RESTART_ARCHIVE_DIR = join(
   PROJECT_ROOT, 'store', 'memory', 'cold', 'context-restart-transcripts',
 )
+
+/**
+ * Cold archives deliberately stay local and out of daily backups, but cannot
+ * grow indefinitely. The retention clock is the archive file's mtime rather
+ * than its human-facing filename: mtime needs no timestamp parsing, covers
+ * every valid filename shape, and is the filesystem's actual record of when
+ * this immutable archive was last written.
+ */
+export const CONTEXT_RESTART_ARCHIVE_RETENTION_MS = 60 * 24 * 60 * 60 * 1000
+
+export interface ContextRestartArchivePruneResult {
+  deleted: string[]
+  failed: string[]
+}
+
+/**
+ * Opportunistically remove only this archive type when a new archive was
+ * published. It never recurses and never follows symlinks; anything that is
+ * not a regular .txt file is outside this retention policy. A pruning failure
+ * is logged but deliberately does not invalidate an already-complete archive
+ * or prevent the gate's clear: retention must not become a new data-loss or
+ * availability interlock.
+ */
+export function pruneExpiredContextRestartArchives(
+  directory: string = CONTEXT_RESTART_ARCHIVE_DIR,
+  nowMs: number = Date.now(),
+): ContextRestartArchivePruneResult {
+  const deleted: string[] = []
+  const failed: string[] = []
+  const cutoffMs = nowMs - CONTEXT_RESTART_ARCHIVE_RETENTION_MS
+  let names: string[]
+  try {
+    names = readdirSync(directory)
+  } catch (err) {
+    // The directory is normally created immediately before this call. If it
+    // vanished concurrently, there is simply nothing to prune this time.
+    logger.warn({ err, directory }, 'context-restart-gate: cold archive retention scan failed')
+    return { deleted, failed }
+  }
+
+  for (const name of names) {
+    if (!name.endsWith('.txt')) continue
+    const path = join(directory, name)
+    try {
+      const stat = lstatSync(path)
+      if (!stat.isFile() || stat.mtimeMs >= cutoffMs) continue
+      unlinkSync(path)
+      deleted.push(path)
+      logger.info(
+        { archive: path, prunedAt: new Date(nowMs).toISOString(), mtimeMs: stat.mtimeMs },
+        'context-restart-gate: expired cold transcript archive deleted',
+      )
+    } catch (err) {
+      failed.push(path)
+      logger.warn({ err, archive: path }, 'context-restart-gate: cold archive retention delete failed')
+    }
+  }
+
+  if (deleted.length > 0 || failed.length > 0) {
+    logger.info(
+      {
+        directory,
+        prunedAt: new Date(nowMs).toISOString(),
+        deletedCount: deleted.length,
+        failedCount: failed.length,
+      },
+      'context-restart-gate: cold archive retention pass completed',
+    )
+  }
+  return { deleted, failed }
+}
 
 function safeAgentPart(value: string): string {
   const safe = value.replace(/[^A-Za-z0-9_-]/g, '')
@@ -117,5 +189,6 @@ export function archiveTranscriptBeforeContextRestart(opts: {
   const tmp = join(CONTEXT_RESTART_ARCHIVE_DIR, `.${basename(filename)}.${process.pid}.tmp`)
   writeFileSync(tmp, formatFullTranscriptForArchive(raw, sourcePath), 'utf-8')
   renameSync(tmp, destination)
+  pruneExpiredContextRestartArchives(CONTEXT_RESTART_ARCHIVE_DIR, opts.nowMs)
   return { path: destination, sourcePath }
 }

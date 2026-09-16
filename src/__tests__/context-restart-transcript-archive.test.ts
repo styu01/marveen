@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -9,8 +9,10 @@ vi.mock('../config.js', () => ({ PROJECT_ROOT: SANDBOX }))
 const {
   CONTEXT_RESTART_ARCHIVE_DIR,
   archiveTranscriptBeforeContextRestart,
+  CONTEXT_RESTART_ARCHIVE_RETENTION_MS,
   deriveTranscriptTopicHint,
   formatFullTranscriptForArchive,
+  pruneExpiredContextRestartArchives,
 } = await import('../web/context-restart-transcript-archive.js')
 const { projectsDirFor } = await import('../web/active-model.js')
 
@@ -64,5 +66,34 @@ describe('context-restart cold transcript archive', () => {
     const formatted = formatFullTranscriptForArchive('{"a":1}\nnot-json\n', '/source.jsonl')
     expect(formatted).toContain('"a": 1')
     expect(formatted).toContain('not-json')
+  })
+
+  it('prunes only regular .txt cold archives older than 60 days by filesystem mtime', () => {
+    const directory = join(SANDBOX, 'retention-fixture')
+    mkdirSync(directory, { recursive: true })
+    const oldArchive = join(directory, 'iris_old.txt')
+    const freshArchive = join(directory, 'iris_fresh.txt')
+    const exactBoundary = join(directory, 'iris_boundary.txt')
+    const nonArchive = join(directory, 'writing.tmp')
+    writeFileSync(oldArchive, 'old', 'utf-8')
+    writeFileSync(freshArchive, 'fresh', 'utf-8')
+    writeFileSync(exactBoundary, 'boundary', 'utf-8')
+    writeFileSync(nonArchive, 'must not be touched', 'utf-8')
+    const nowMs = Date.parse('2026-09-16T12:00:00.000Z')
+    const oldMs = nowMs - CONTEXT_RESTART_ARCHIVE_RETENTION_MS - 1
+    const freshMs = nowMs - CONTEXT_RESTART_ARCHIVE_RETENTION_MS + 1
+    const boundaryMs = nowMs - CONTEXT_RESTART_ARCHIVE_RETENTION_MS
+    utimesSync(oldArchive, oldMs / 1000, oldMs / 1000)
+    utimesSync(freshArchive, freshMs / 1000, freshMs / 1000)
+    utimesSync(exactBoundary, boundaryMs / 1000, boundaryMs / 1000)
+
+    const result = pruneExpiredContextRestartArchives(directory, nowMs)
+
+    expect(result.deleted).toEqual([oldArchive])
+    expect(result.failed).toEqual([])
+    expect(existsSync(oldArchive)).toBe(false)
+    expect(existsSync(freshArchive)).toBe(true)
+    expect(existsSync(exactBoundary)).toBe(true)
+    expect(existsSync(nonArchive)).toBe(true)
   })
 })
