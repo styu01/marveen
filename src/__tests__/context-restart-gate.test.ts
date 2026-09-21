@@ -185,10 +185,15 @@ describe('decideGate -- hard-guard interlock', () => {
 })
 
 describe('decideGate -- fleet usage pause', () => {
-  it('blocks while the existing 90%+ fleet usage pause is active', () => {
+  it('allows an otherwise-clear session while the 90%+ fleet usage pause is active', () => {
     const d = decide({ fleetUsagePaused: true })
+    expect(d.action).toBe('allow')
+  })
+
+  it('does not weaken the other fail-closed conditions during a fleet usage pause', () => {
+    const d = decide({ fleetUsagePaused: true, paneState: 'busy' })
     expect(d.action).toBe('block')
-    expect(d.reason).toMatch(/usage-fleet-paused/)
+    expect(d.reason).toMatch(/pane-busy/)
   })
 })
 

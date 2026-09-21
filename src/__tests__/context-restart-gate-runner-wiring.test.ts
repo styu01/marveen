@@ -210,18 +210,24 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
     expect(readGateRunState(name).preClearNoticeAt).toBe(nowMs + 6 * 60_000)
   })
 
-  it('does not send a pre-clear notice or clear while the shared usage fleet pause is active', async () => {
+  it('sends a pre-clear notice and clears while the shared usage fleet pause is active when all local signals are clear', async () => {
     const name = 'worker-usage-paused'
     writeGateConfig(name, { enabled: true, thresholdTokens: 100 })
-    vi.mocked(readContextTokensFromProjectDir).mockReturnValueOnce(500)
-    vi.mocked(readFleetPauseState).mockReturnValueOnce({ paused: true, metric: 'five_hour', percent: 91 })
+    vi.mocked(readContextTokensFromProjectDir).mockReturnValue(500)
+    vi.mocked(readFleetPauseState).mockReturnValue({ paused: true, metric: 'five_hour', percent: 91 })
+    const nowMs = Date.now()
 
-    await checkAgent(name, Date.now())
+    await checkAgent(name, nowMs)
 
-    expect(createAgentMessage).not.toHaveBeenCalled()
+    expect(createAgentMessage).toHaveBeenCalledTimes(1)
+    expect(readGateRunState(name).preClearNoticeAt).toBe(nowMs)
     expect(archiveTranscriptBeforeContextRestart).not.toHaveBeenCalled()
-    expect(execFileSyncMock.mock.calls.some(([, args]) => args?.[0] === 'send-keys')).toBe(false)
-    expect(readGateRunState(name).preClearNoticeAt).toBeNull()
+
+    await checkAgent(name, nowMs + PRE_CLEAR_NOTICE_MS)
+
+    expect(archiveTranscriptBeforeContextRestart).toHaveBeenCalledTimes(1)
+    expect(execFileSyncMock.mock.calls.some(([, args]) => args?.includes('/clear'))).toBe(true)
+    expect(readGateRunState(name).lastClearAt).toBe(nowMs + PRE_CLEAR_NOTICE_MS)
   })
 
   it('invalidates an old notice when new Kanban work appears, requiring a fresh notice after it clears', async () => {

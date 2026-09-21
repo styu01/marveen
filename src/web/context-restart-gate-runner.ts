@@ -460,9 +460,9 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
 
   const liveTaskState = hasLiveTaskStateFile(name, nowMs)
 
-  // One shared, already-enforced 90%+ usage state. A pause means no agent can
-  // process a pre-clear warning, so treat it as another local fail-closed gate
-  // condition and do not send a pointless warning until it clears.
+  // Keep the shared 90%+ usage state in decision telemetry. It is deliberately
+  // not a gate condition: the soft 400k context threshold must still clear an
+  // otherwise-idle session during a long-lived fleet usage pause.
   const fleetPause = readFleetPauseState()
 
   // An assigned card is work even when the pane happens to look idle. Query

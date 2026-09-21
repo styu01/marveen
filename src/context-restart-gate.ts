@@ -133,7 +133,7 @@ export interface GateInputs {
    */
   hasOpenKanbanCard: boolean
 
-  /** Fleet-wide 90%+ usage pause is active: never clear while the agent cannot process the pre-clear notice. */
+  /** Fleet-wide 90%+ usage pause is active. Informational only; it never blocks a context restart. */
   fleetUsagePaused: boolean
 }
 
@@ -185,14 +185,6 @@ export function decideGate(
   // the two mechanisms never simultaneously touch the pane.
   if (inputs.hardGuardPhase === 'await-handoff' || inputs.hardGuardPhase === 'await-ready') {
     return block(firstBlockedAt, inputs.nowMs, cfg, `hard-guard-armed (phase: ${inputs.hardGuardPhase})`)
-  }
-
-  // A fleet-wide quota pause means the agent cannot usefully process either a
-  // new pre-clear notice or the freshly-cleared session. Wait for the existing
-  // usage-monitor pause state to clear; it is an additional gate condition,
-  // never a replacement for the local live-work signals below.
-  if (inputs.fleetUsagePaused) {
-    return block(firstBlockedAt, inputs.nowMs, cfg, 'usage-fleet-paused (90%+ quota pause active)')
   }
 
   // ---- Gate conditions (FAIL-CLOSED) ----------------------------------------
