@@ -12,6 +12,7 @@ Két dolog teszi különlegessé:
 
 1. **Automatikus bontás:** az LLM egy feladatból kártyák hierarchiáját csinálja (`parent_id`-vel összekötve), amit jóváhagyhatsz vagy finomíthatsz — nem kell fejből tartani a teendők sorát.
 2. **Önjáró audit:** 4 óránként a rendszer maga átnézi a táblát — archiválja a régi lezárt kártyákat, és számon kéri a beakadt feladatokat a felelősön. Nem neked kell kopogtatni, hogy "na, hogy áll az a dolog?"
+   Az ismétlődő feladat-sablonokat kihagyja: ezek tartós konténerek, nem beakadt futások.
 
 **Kuriózum:** a kártyák és státuszok automatikusan bekerülnek minden ügynök kontextusába. Nem kell külön tájékoztatni senkit arról, "hol tartunk" — mindenki látja a teljes képet, és ott folytatja, ahol a másik abbahagyta.
 

@@ -34,7 +34,7 @@ const CLEAR_INPUTS: GateInputs = {
   hasChildProcesses:    false,
   hasOpenQuestion:      false,
   hasLiveTaskState:     false,
-  hasOpenKanbanCard:    false,
+  hasBlockingKanbanCard: false,
   fleetUsagePaused:     false,
 }
 const ENABLED: GateConfig = { ...DEFAULT_GATE_CONFIG, enabled: true }
@@ -291,13 +291,13 @@ describe('decideGate -- live task state', () => {
 
 describe('decideGate -- assigned Kanban work', () => {
   it('blocks when an assigned non-done, non-archived Kanban card exists', () => {
-    const d = decide({ hasOpenKanbanCard: true })
+    const d = decide({ hasBlockingKanbanCard: true })
     expect(d.action).toBe('block')
-    expect(d.reason).toMatch(/open-kanban-card/)
+    expect(d.reason).toMatch(/blocking-kanban-card/)
   })
 
   it('allows when no assigned open Kanban card exists', () => {
-    expect(decide({ hasOpenKanbanCard: false }).action).toBe('allow')
+    expect(decide({ hasBlockingKanbanCard: false }).action).toBe('allow')
   })
 })
 

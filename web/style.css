@@ -357,6 +357,7 @@ nav { display: flex; gap: 4px; }
   text-align: center;
   vertical-align: middle;
 }
+
 .updates-badge[hidden] { display: none; }
 
 .updates-summary {
@@ -1005,6 +1006,13 @@ main {
   display: flex;
   align-items: center;
   gap: 3px;
+}
+.kanban-card-recurring {
+  font-size: 10px;
+  color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 10%, transparent);
+  border-radius: 4px;
+  padding: 1px 5px;
 }
 .assignee-dot {
   width: 14px;
@@ -7441,4 +7449,3 @@ body {
   color: var(--text-muted);
   vertical-align: middle;
 }
-

@@ -15,6 +15,7 @@ import {
   countNewHotMemories,
   countPlannedKanbanCards,
   getDbFileSizeMb,
+  isDashboardUserOwner,
 } from '../../db.js'
 import { normalizeKanbanRefs } from '../kanban-ref-normalize.js'
 import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID, STORE_DIR, WEB_HOST, WEB_PORT, KANBAN_LABEL_COLORS } from '../../config.js'
@@ -26,6 +27,15 @@ import { logger } from '../../logger.js'
 import { readBody, json, jsonMaybeGzip } from '../http-helpers.js'
 import { getEffectiveSettingValue } from '../../settings-store.js'
 import type { RouteContext } from './types.js'
+
+/** A token/device/federation credential is never sufficient for this flag. */
+export function mayManageRecurringTemplate(auth: RouteContext['auth']): boolean {
+  return auth?.kind === 'session' && typeof auth.user === 'string' && isDashboardUserOwner(auth.user)
+}
+
+function recurringTemplateFieldIsValid(value: unknown): value is boolean {
+  return typeof value === 'boolean'
+}
 
 // A headless agent cannot "drag" a card to done, so the dispatch hands it the
 // exact curl commands to (1) post a short, human-readable result summary as a
@@ -179,7 +189,7 @@ export function buildHeartbeatSummaryResponse(
 }
 
 export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
-  const { req, res, path, method } = ctx
+  const { req, res, path, method, auth } = ctx
 
   if (path === '/api/kanban' && method === 'GET') {
     // Embed each card's labels in one extra JOIN query (getLabelsForAllCards)
@@ -315,8 +325,20 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   if (path === '/api/kanban' && method === 'POST') {
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      json(res, { error: 'A kártya adatai objektumként szükségesek' }, 400); return true
+    }
+    if (Object.hasOwn(data, 'is_recurring_template')) {
+      if (!recurringTemplateFieldIsValid(data.is_recurring_template)) {
+        json(res, { error: 'is_recurring_template boolean mező kell legyen' }, 400); return true
+      }
+      if (!mayManageRecurringTemplate(auth)) {
+        logger.warn({ authKind: auth?.kind ?? 'none' }, 'Kanban recurring-template create rejected for non-owner principal')
+        json(res, { error: 'Csak a tulajdonos bejelentkezett dashboard-sessionje jelölhet ismétlődő sablont' }, 403); return true
+      }
+    }
     const id = randomUUID().slice(0, 8)
-    createKanbanCard({ id, ...data })
+    createKanbanCard({ id, ...data }, data.is_recurring_template ? auth?.user : undefined)
     json(res, { ok: true, id })
     return true
   }
@@ -326,7 +348,19 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const id = decodeURIComponent(kanbanCardMatch[1])
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
-    if (updateKanbanCard(id, data)) { json(res, { ok: true }); return true }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      json(res, { error: 'A kártya adatai objektumként szükségesek' }, 400); return true
+    }
+    if (Object.hasOwn(data, 'is_recurring_template')) {
+      if (!recurringTemplateFieldIsValid(data.is_recurring_template)) {
+        json(res, { error: 'is_recurring_template boolean mező kell legyen' }, 400); return true
+      }
+      if (!mayManageRecurringTemplate(auth)) {
+        logger.warn({ id, authKind: auth?.kind ?? 'none' }, 'Kanban recurring-template update rejected for non-owner principal')
+        json(res, { error: 'Csak a tulajdonos bejelentkezett dashboard-sessionje jelölhet ismétlődő sablont' }, 403); return true
+      }
+    }
+    if (updateKanbanCard(id, data, Object.hasOwn(data, 'is_recurring_template') ? auth?.user : undefined)) { json(res, { ok: true }); return true }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
   }

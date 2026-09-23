@@ -16,7 +16,7 @@ import { readFleetPauseState } from './usage-fleet-pause.js'
 import {
   getDispatchedPendingStats,
   openInboundQuestionMessageId,
-  hasOpenKanbanCardForAssignee,
+  hasBlockingKanbanCardForAssignee,
   createAgentMessage,
 } from '../db.js'
 import { archiveTranscriptBeforeContextRestart } from './context-restart-transcript-archive.js'
@@ -468,8 +468,8 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
   // An assigned card is work even when the pane happens to look idle. Query
   // failures are deliberately converted to "open": a missing safety signal
   // must never become permission to /clear.
-  const openKanbanCard = (() => {
-    try { return hasOpenKanbanCardForAssignee(name) }
+  const blockingKanbanCard = (() => {
+    try { return hasBlockingKanbanCardForAssignee(name) }
     catch { return null }
   })()
 
@@ -484,8 +484,8 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
   if (dispatchedStats === null) {
     logger.warn({ agent: name }, 'context-restart-gate: dispatched-stats query failed (fail-closed)')
   }
-  if (openKanbanCard === null) {
-    logger.warn({ agent: name }, 'context-restart-gate: open-kanban-card query failed (fail-closed)')
+  if (blockingKanbanCard === null) {
+    logger.warn({ agent: name }, 'context-restart-gate: blocking-kanban-card query failed (fail-closed)')
   }
 
   const inputs: GateInputs = {
@@ -499,7 +499,7 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
     hasChildProcesses:      childProcesses,
     hasOpenQuestion:        openQuestion,
     hasLiveTaskState:       liveTaskState,
-    hasOpenKanbanCard:      openKanbanCard === null ? true : openKanbanCard,
+    hasBlockingKanbanCard:  blockingKanbanCard === null ? true : blockingKanbanCard,
     fleetUsagePaused:       fleetPause.paused,
   }
 

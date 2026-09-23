@@ -121,6 +121,7 @@ export interface KanbanExport {
   cards: Record<string, unknown>[]
   comments: Record<string, unknown>[]
   cardEvents: Record<string, unknown>[]
+  recurringTemplateEvents: Record<string, unknown>[]
   labels: Record<string, unknown>[]
   cardLabels: Record<string, unknown>[]
 }
@@ -671,6 +672,7 @@ export function exportFleet(options: { vaultPassword?: string } = {}): ExportedF
     cards: db.prepare('SELECT * FROM kanban_cards').all() as Record<string, unknown>[],
     comments: db.prepare('SELECT * FROM kanban_comments').all() as Record<string, unknown>[],
     cardEvents: db.prepare('SELECT * FROM kanban_card_events').all() as Record<string, unknown>[],
+    recurringTemplateEvents: db.prepare('SELECT * FROM kanban_recurring_template_events').all() as Record<string, unknown>[],
     labels: db.prepare('SELECT * FROM labels').all() as Record<string, unknown>[],
     cardLabels: db.prepare('SELECT * FROM kanban_card_labels').all() as Record<string, unknown>[],
   }
@@ -1130,6 +1132,16 @@ export function importFleet(
           .get(e.card_id, e.created_at, e.to_status)) {
           db.prepare('INSERT INTO kanban_card_events (card_id, from_status, to_status, actor, created_at) VALUES (?, ?, ?, ?, ?)')
             .run(e.card_id, e.from_status ?? null, e.to_status, e.actor, e.created_at)
+        }
+      }
+
+      for (const event of fleet.kanban?.recurringTemplateEvents ?? []) {
+        const e = event as any
+        if (!e.card_id || (e.to_value !== 0 && e.to_value !== 1) || !e.actor || !e.created_at) continue
+        if (!db.prepare('SELECT 1 FROM kanban_recurring_template_events WHERE card_id=? AND created_at=? AND to_value=? AND actor=?')
+          .get(e.card_id, e.created_at, e.to_value, e.actor)) {
+          db.prepare('INSERT INTO kanban_recurring_template_events (card_id, from_value, to_value, actor, created_at) VALUES (?, ?, ?, ?, ?)')
+            .run(e.card_id, e.from_value ?? null, e.to_value, e.actor, e.created_at)
         }
       }
 

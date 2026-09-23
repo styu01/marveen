@@ -30,7 +30,7 @@ vi.mock('../db.js', () => ({
   // try/catch to `false` on every call -- passing, but no longer exercising
   // the real wiring. null = "nothing open", matching the old mock's false.
   openInboundQuestionMessageId: vi.fn(() => null),
-  hasOpenKanbanCardForAssignee: vi.fn(() => false),
+  hasBlockingKanbanCardForAssignee: vi.fn(() => false),
   createAgentMessage: vi.fn(),
 }))
 vi.mock('../web/context-restart-transcript-archive.js', () => ({
@@ -82,14 +82,14 @@ const { checkAgent } = await import('../web/context-restart-gate-runner.js')
 const { writeGateConfig, readGateRunState } = await import('../web/context-restart-gate-store.js')
 const { readContextTokensFromProjectDir } = await import('../web/active-model.js')
 const { PRE_CLEAR_NOTICE_MS } = await import('../context-restart-gate.js')
-const { hasOpenKanbanCardForAssignee, createAgentMessage, openInboundQuestionMessageId } = await import('../db.js')
+const { hasBlockingKanbanCardForAssignee, createAgentMessage, openInboundQuestionMessageId } = await import('../db.js')
 const { archiveTranscriptBeforeContextRestart } = await import('../web/context-restart-transcript-archive.js')
 const { readFleetPauseState } = await import('../web/usage-fleet-pause.js')
 
 beforeEach(() => {
   execFileSyncMock.mockClear()
-  vi.mocked(hasOpenKanbanCardForAssignee).mockReset()
-  vi.mocked(hasOpenKanbanCardForAssignee).mockReturnValue(false)
+  vi.mocked(hasBlockingKanbanCardForAssignee).mockReset()
+  vi.mocked(hasBlockingKanbanCardForAssignee).mockReturnValue(false)
   vi.mocked(openInboundQuestionMessageId).mockReset()
   vi.mocked(openInboundQuestionMessageId).mockReturnValue(null)
   vi.mocked(createAgentMessage).mockClear()
@@ -170,7 +170,7 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
     const name = 'worker-kanban-open'
     writeGateConfig(name, { enabled: true, thresholdTokens: 100 })
     vi.mocked(readContextTokensFromProjectDir).mockReturnValueOnce(500)
-    vi.mocked(hasOpenKanbanCardForAssignee).mockReturnValueOnce(true)
+    vi.mocked(hasBlockingKanbanCardForAssignee).mockReturnValueOnce(true)
 
     await checkAgent(name, Date.now())
 
@@ -182,7 +182,7 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
     const name = 'worker-kanban-unmeasurable'
     writeGateConfig(name, { enabled: true, thresholdTokens: 100 })
     vi.mocked(readContextTokensFromProjectDir).mockReturnValueOnce(500)
-    vi.mocked(hasOpenKanbanCardForAssignee).mockImplementationOnce(() => { throw new Error('db unavailable') })
+    vi.mocked(hasBlockingKanbanCardForAssignee).mockImplementationOnce(() => { throw new Error('db unavailable') })
 
     await checkAgent(name, Date.now())
 
@@ -238,7 +238,7 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
     await checkAgent(name, nowMs)
     expect(readGateRunState(name).preClearNoticeAt).toBe(nowMs)
 
-    vi.mocked(hasOpenKanbanCardForAssignee).mockReturnValueOnce(true)
+    vi.mocked(hasBlockingKanbanCardForAssignee).mockReturnValueOnce(true)
     await checkAgent(name, nowMs + PRE_CLEAR_NOTICE_MS)
     expect(readGateRunState(name).preClearNoticeAt).toBeNull()
     expect(execFileSyncMock.mock.calls.some(([, args]) => args?.includes('/clear'))).toBe(false)

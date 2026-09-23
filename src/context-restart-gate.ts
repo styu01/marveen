@@ -126,12 +126,12 @@ export interface GateInputs {
   hasLiveTaskState: boolean
 
   /**
-   * An assigned Kanban card that is neither `done` nor archived exists.
+   * An assigned, non-recurring Kanban card that is neither `done` nor archived exists.
    * This is an independent live-work signal: an agent can look idle and have
    * no child process while still owning a planned/waiting/in-progress card.
    * The runner turns a failed DB query into true, preserving fail-closed.
    */
-  hasOpenKanbanCard: boolean
+  hasBlockingKanbanCard: boolean
 
   /** Fleet-wide 90%+ usage pause is active. Informational only; it never blocks a context restart. */
   fleetUsagePaused: boolean
@@ -236,8 +236,8 @@ export function decideGate(
   // Assigned, unfinished Kanban work is a separate source of truth from the
   // process-level checks above. In particular, a briefly idle pane does not
   // mean a planned/waiting card is safe to abandon.
-  if (inputs.hasOpenKanbanCard) {
-    return block(firstBlockedAt, inputs.nowMs, cfg, 'open-kanban-card (active non-archived assigned work)')
+  if (inputs.hasBlockingKanbanCard) {
+    return block(firstBlockedAt, inputs.nowMs, cfg, 'blocking-kanban-card (active non-archived assigned work)')
   }
 
   // All gate conditions clear.

@@ -11,7 +11,7 @@ You don't need to micro-manage the fleet — that's the point of this kanban sys
 Two things make it special:
 
 1. **Automatic breakdown:** the LLM turns a task into a card hierarchy (linked with `parent_id`), which you can approve or refine — no need to hold the full to-do list in your head.
-2. **Self-driving audit:** every 4 hours the system reviews the board itself — archives old closed cards and follows up with the responsible agent on stalled tasks. You don't need to knock and ask "how's that thing going?"
+2. **Self-driving audit:** every 4 hours the system reviews the board itself — archives old closed cards and follows up with the responsible agent on stalled tasks. Recurring task templates are skipped: they are durable containers, not stalled runs. You don't need to knock and ask "how's that thing going?"
 
 **Highlight:** card statuses are automatically included in every agent's context. Nobody needs a separate briefing on "where we are" — everyone sees the full picture and picks up where the other left off.
 

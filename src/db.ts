@@ -164,7 +164,8 @@ export function initDatabase(dbPathOverride?: string): void {
       sort_order REAL NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
-      archived_at INTEGER
+      archived_at INTEGER,
+      is_recurring_template INTEGER NOT NULL DEFAULT 0 CHECK(is_recurring_template IN (0, 1))
     )
   `)
   // Migration: add project column to kanban_cards for installs created
@@ -190,6 +191,14 @@ export function initDatabase(dbPathOverride?: string): void {
   } catch {
     // column already exists
   }
+  // Existing cards remain gate-blocking unless the owner explicitly marks a
+  // long-lived recurring-work container after review.
+  try {
+    db.exec('ALTER TABLE kanban_cards ADD COLUMN is_recurring_template INTEGER NOT NULL DEFAULT 0 CHECK(is_recurring_template IN (0, 1))')
+  } catch {
+    // column already exists
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_kanban_gate_assignee ON kanban_cards(assignee, archived_at, status, is_recurring_template)')
   // Migration: add 'testing' status to kanban_cards CHECK constraint.
   // SQLite can't ALTER a CHECK constraint, so we recreate the table when the
   // current schema doesn't yet include 'testing'. Idempotent on fresh DBs.
@@ -211,17 +220,19 @@ export function initDatabase(dbPathOverride?: string): void {
           updated_at INTEGER NOT NULL,
           archived_at INTEGER,
           parent_id TEXT REFERENCES kanban_cards_new(id),
-          dispatched_at INTEGER
+          dispatched_at INTEGER,
+          is_recurring_template INTEGER NOT NULL DEFAULT 0 CHECK(is_recurring_template IN (0, 1))
         );
         INSERT INTO kanban_cards_new
           SELECT id, title, description, status, assignee, priority, project, due_date,
-                 sort_order, created_at, updated_at, archived_at, parent_id, dispatched_at
+                 sort_order, created_at, updated_at, archived_at, parent_id, dispatched_at, is_recurring_template
           FROM kanban_cards;
         DROP TABLE kanban_cards;
         ALTER TABLE kanban_cards_new RENAME TO kanban_cards;
       `)
       db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_parent ON kanban_cards(parent_id)`)
       db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_status ON kanban_cards(status, archived_at)`)
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_gate_assignee ON kanban_cards(assignee, archived_at, status, is_recurring_template)`)
     }
   } catch (err) {
     logger.warn({ err }, 'kanban_cards testing-status migration failed -- continuing')
@@ -422,6 +433,18 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_events_card ON kanban_card_events(card_id, created_at)`)
+  // Only the owner can set this flag; retain its actor/value history.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS kanban_recurring_template_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      card_id TEXT NOT NULL,
+      from_value INTEGER,
+      to_value INTEGER NOT NULL CHECK(to_value IN (0, 1)),
+      actor TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_recurring_events_card ON kanban_recurring_template_events(card_id, created_at)`)
 
   // listKanbanCards()'s auto-archive sweep (below) treats a card's updated_at
   // as "when did this card last change", and archives a done card once that
@@ -989,9 +1012,23 @@ export function initDatabase(dbPathOverride?: string): void {
       password_hash TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
-      disabled INTEGER NOT NULL DEFAULT 0
+      disabled INTEGER NOT NULL DEFAULT 0,
+      -- A browser-login principal with the narrowly scoped authority to mark
+      -- durable recurring templates as non-blocking for context restart.
+      is_owner INTEGER NOT NULL DEFAULT 0 CHECK(is_owner IN (0, 1))
     )
   `)
+  // Migration and bootstrap: retain an existing explicit owner, otherwise
+  // nominate exactly the earliest user. Never grant the privilege to every
+  // historical dashboard user merely because this version was installed.
+  try {
+    db.exec('ALTER TABLE dashboard_users ADD COLUMN is_owner INTEGER NOT NULL DEFAULT 0 CHECK(is_owner IN (0, 1))')
+  } catch {
+    // column already exists
+  }
+  db.exec(`UPDATE dashboard_users SET is_owner = 1
+           WHERE id = (SELECT id FROM dashboard_users ORDER BY id ASC LIMIT 1)
+             AND NOT EXISTS (SELECT 1 FROM dashboard_users WHERE is_owner = 1)`)
   // Browser login sessions. NOT named `sessions` -- that table already maps
   // Telegram chats to Claude session ids. Only sha256(session_id) is stored, so
   // a DB leak does not hand out live sessions. Rows survive dashboard restarts;
@@ -1133,16 +1170,18 @@ export interface DashboardUser {
   created_at: number
   updated_at: number
   disabled: number
+  is_owner: number
 }
 
 export type DashboardUserPublic = Omit<DashboardUser, 'password_hash'>
 
 export function createDashboardUser(username: string, passwordHash: string): DashboardUser {
   const now = Math.floor(Date.now() / 1000)
+  const isOwner = !db.prepare('SELECT 1 FROM dashboard_users WHERE is_owner = 1 LIMIT 1').get()
   const info = db
-    .prepare('INSERT INTO dashboard_users (username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?)')
-    .run(username, passwordHash, now, now)
-  return { id: Number(info.lastInsertRowid), username, password_hash: passwordHash, created_at: now, updated_at: now, disabled: 0 }
+    .prepare('INSERT INTO dashboard_users (username, password_hash, created_at, updated_at, is_owner) VALUES (?, ?, ?, ?, ?)')
+    .run(username, passwordHash, now, now, isOwner ? 1 : 0)
+  return { id: Number(info.lastInsertRowid), username, password_hash: passwordHash, created_at: now, updated_at: now, disabled: 0, is_owner: isOwner ? 1 : 0 }
 }
 
 export function getDashboardUser(username: string): DashboardUser | undefined {
@@ -1151,9 +1190,16 @@ export function getDashboardUser(username: string): DashboardUser | undefined {
     .get(username) as DashboardUser | undefined
 }
 
+/** True only for the enabled owner row; used for privileged browser actions. */
+export function isDashboardUserOwner(username: string): boolean {
+  return !!db.prepare(
+    'SELECT 1 FROM dashboard_users WHERE username = ? COLLATE NOCASE AND is_owner = 1 AND disabled = 0'
+  ).get(username)
+}
+
 export function listDashboardUsers(): DashboardUserPublic[] {
   return db
-    .prepare('SELECT id, username, created_at, updated_at, disabled FROM dashboard_users ORDER BY username COLLATE NOCASE')
+    .prepare('SELECT id, username, created_at, updated_at, disabled, is_owner FROM dashboard_users ORDER BY username COLLATE NOCASE')
     .all() as DashboardUserPublic[]
 }
 
@@ -1764,6 +1810,8 @@ export interface KanbanCard {
   // is woken (kanban -> agent dispatch). NULL = never dispatched; the once-only
   // guard so re-dragging a card does not re-prompt the agent.
   dispatched_at: number | null
+  /** Durable recurring-work container, not a live run. */
+  is_recurring_template: 0 | 1
 }
 
 export interface KanbanComment {
@@ -1771,6 +1819,15 @@ export interface KanbanComment {
   card_id: string
   author: string
   content: string
+  created_at: number
+}
+
+export interface KanbanRecurringTemplateEvent {
+  id: number
+  card_id: string
+  from_value: 0 | 1 | null
+  to_value: 0 | 1
+  actor: string
   created_at: number
 }
 
@@ -1800,7 +1857,8 @@ export function createKanbanCard(card: {
   project?: string
   parent_id?: string
   due_date?: number
-}): void {
+  is_recurring_template?: boolean
+}, recurringTemplateActor?: string): void {
   const now = Math.floor(Date.now() / 1000)
   const status = card.status ?? 'planned'
   const maxRow = db.prepare(
@@ -1809,24 +1867,37 @@ export function createKanbanCard(card: {
   const sortOrder = (maxRow?.m ?? -1) + 1
 
   db.prepare(
-    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, is_recurring_template)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     card.id, card.title, card.description ?? null, status,
     card.assignee ?? null, card.priority ?? 'normal',
-    card.project ?? null, card.parent_id ?? null, card.due_date ?? null, sortOrder, now, now
+    card.project ?? null, card.parent_id ?? null, card.due_date ?? null, sortOrder, now, now, card.is_recurring_template ? 1 : 0
   )
+  if (card.is_recurring_template) {
+    db.prepare('INSERT INTO kanban_recurring_template_events (card_id, from_value, to_value, actor, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(card.id, null, 1, recurringTemplateActor ?? 'system', now)
+  }
 }
 
-export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>): boolean {
+export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>, recurringTemplateActor?: string): boolean {
   const card = getKanbanCard(id)
   if (!card) return false
   const now = Math.floor(Date.now() / 1000)
   const f = { ...card, ...fields, updated_at: now }
-  return db.prepare(
-    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, archived_at=?
+  const changed = db.prepare(
+    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, archived_at=?, is_recurring_template=?
      WHERE id=?`
-  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.archived_at, id).changes > 0
+  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.archived_at, f.is_recurring_template ? 1 : 0, id).changes > 0
+  if (changed && card.is_recurring_template !== (f.is_recurring_template ? 1 : 0)) {
+    db.prepare('INSERT INTO kanban_recurring_template_events (card_id, from_value, to_value, actor, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(id, card.is_recurring_template, f.is_recurring_template ? 1 : 0, recurringTemplateActor ?? 'system', now)
+  }
+  return changed
+}
+
+export function getKanbanRecurringTemplateEvents(cardId: string): KanbanRecurringTemplateEvent[] {
+  return db.prepare('SELECT * FROM kanban_recurring_template_events WHERE card_id=? ORDER BY id ASC').all(cardId) as KanbanRecurringTemplateEvent[]
 }
 
 export function getChildCards(parentId: string): KanbanCard[] {
@@ -2656,12 +2727,13 @@ export function openInboundQuestionMessageId(agentId: string): string | null {
  * is historical record rather than live work even if its old status was never
  * changed to `done` before archival.
  */
-export const OPEN_KANBAN_CARD_FOR_ASSIGNEE_SQL = `SELECT 1 FROM kanban_cards
+export const BLOCKING_KANBAN_CARD_FOR_ASSIGNEE_SQL = `SELECT 1 FROM kanban_cards
   WHERE assignee = ? AND status != 'done' AND archived_at IS NULL
+    AND is_recurring_template = 0
   LIMIT 1`
 
-export function hasOpenKanbanCardForAssignee(assignee: string): boolean {
-  return !!db.prepare(OPEN_KANBAN_CARD_FOR_ASSIGNEE_SQL).get(assignee)
+export function hasBlockingKanbanCardForAssignee(assignee: string): boolean {
+  return !!db.prepare(BLOCKING_KANBAN_CARD_FOR_ASSIGNEE_SQL).get(assignee)
 }
 
 /**

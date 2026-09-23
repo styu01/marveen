@@ -1484,7 +1484,7 @@ function createCardEl(card, embeddedChildren = []) {
   // Skipped for done cards. Config thresholds and colours come from window._marveen.kanbanAging.
   let agingBadgeHtml = ''
   const agingCfg = window._marveen?.kanbanAging
-  if (agingCfg && card.updated_at && card.status !== 'done') {
+  if (agingCfg && card.updated_at && card.status !== 'done' && !card.is_recurring_template) {
     const hoursOld = (Date.now() / 1000 - card.updated_at) / 3600
     let agingLevel = null
     let agingColor = null
@@ -1505,6 +1505,10 @@ function createCardEl(card, embeddedChildren = []) {
     }
   }
 
+  const recurringHtml = card.is_recurring_template
+    ? `<span class="kanban-card-recurring" title="${t('kanban.recurring.hint')}">🔁 ${t('kanban.recurring.badge')}</span>`
+    : ''
+
   // Embedded subtasks: rendered as mini-cards below a divider when the subtask
   // shares the same column as this parent card.
   let embeddedHtml = ''
@@ -1523,7 +1527,7 @@ function createCardEl(card, embeddedChildren = []) {
   el.innerHTML = `
     ${projectHtml}
     <div class="kanban-card-title">${seqHtml}${escapeHtml(card.title)}</div>
-    <div class="kanban-card-footer">${assigneeHtml}${dueHtml}</div>
+    <div class="kanban-card-footer">${assigneeHtml}${dueHtml}${recurringHtml}</div>
     ${labelsHtml}
     <div class="kanban-card-actions">
       <button class="card-breakdown-btn" title="${t('kanban.btn.breakdown')}" aria-label="${t('kanban.btn.breakdown')}">⚡</button>
@@ -1850,6 +1854,7 @@ function openNewCardModal(status) {
   document.getElementById('cardPriority').value = 'normal'
   document.getElementById('cardProject').value = ''
   document.getElementById('cardDue').value = ''
+  document.getElementById('cardRecurringTemplate').checked = false
   document.getElementById('cardEditId').value = ''
   document.getElementById('cardEditStatus').value = status || 'planned'
   populateAssigneeSelect('cardAssignee')
@@ -1881,6 +1886,7 @@ document.getElementById('saveCardBtn').addEventListener('click', async () => {
     assignee: document.getElementById('cardAssignee').value || null,
     priority: document.getElementById('cardPriority').value,
     project: document.getElementById('cardProject').value.trim() || null,
+    is_recurring_template: document.getElementById('cardRecurringTemplate').checked,
     due_date: document.getElementById('cardDue').value
       ? Math.floor(new Date(document.getElementById('cardDue').value).getTime() / 1000)
       : null,
@@ -2262,6 +2268,7 @@ async function showCardDetail(card) {
     document.getElementById('cardDue').value = card.due_date
       ? new Date(card.due_date * 1000).toISOString().split('T')[0]
       : ''
+    document.getElementById('cardRecurringTemplate').checked = !!card.is_recurring_template
     document.getElementById('cardEditId').value = card.id
     document.getElementById('cardEditStatus').value = card.status
     populateAssigneeSelect('cardAssignee', card.assignee)
