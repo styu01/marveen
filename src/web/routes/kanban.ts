@@ -328,17 +328,22 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
       json(res, { error: 'A kártya adatai objektumként szükségesek' }, 400); return true
     }
+    const wantsRecurringTemplate = Object.hasOwn(data, 'is_recurring_template') && !!data.is_recurring_template
     if (Object.hasOwn(data, 'is_recurring_template')) {
       if (!recurringTemplateFieldIsValid(data.is_recurring_template)) {
         json(res, { error: 'is_recurring_template boolean mező kell legyen' }, 400); return true
       }
-      if (!mayManageRecurringTemplate(auth)) {
+      // A new card defaults to is_recurring_template=false, so only an
+      // explicit true is an actual "set the flag" action requiring the
+      // owner check -- the UI form always includes this field on every
+      // save, so false must stay a no-op for every non-owner caller.
+      if (wantsRecurringTemplate && !mayManageRecurringTemplate(auth)) {
         logger.warn({ authKind: auth?.kind ?? 'none' }, 'Kanban recurring-template create rejected for non-owner principal')
         json(res, { error: 'Csak a tulajdonos bejelentkezett dashboard-sessionje jelölhet ismétlődő sablont' }, 403); return true
       }
     }
     const id = randomUUID().slice(0, 8)
-    createKanbanCard({ id, ...data }, data.is_recurring_template ? auth?.user : undefined)
+    createKanbanCard({ id, ...data }, wantsRecurringTemplate ? auth?.user : undefined)
     json(res, { ok: true, id })
     return true
   }
@@ -351,16 +356,24 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
       json(res, { error: 'A kártya adatai objektumként szükségesek' }, 400); return true
     }
+    let recurringTemplateChanging = false
     if (Object.hasOwn(data, 'is_recurring_template')) {
       if (!recurringTemplateFieldIsValid(data.is_recurring_template)) {
         json(res, { error: 'is_recurring_template boolean mező kell legyen' }, 400); return true
       }
-      if (!mayManageRecurringTemplate(auth)) {
+      // The card-edit UI form always includes this field on every save, not
+      // just when the user actually touches the checkbox -- so the owner
+      // check must only fire when the value genuinely differs from what's
+      // already stored, or every routine edit by anyone else would 403.
+      const existing = getKanbanCard(id)
+      const currentValue = !!existing?.is_recurring_template
+      recurringTemplateChanging = !!data.is_recurring_template !== currentValue
+      if (recurringTemplateChanging && !mayManageRecurringTemplate(auth)) {
         logger.warn({ id, authKind: auth?.kind ?? 'none' }, 'Kanban recurring-template update rejected for non-owner principal')
         json(res, { error: 'Csak a tulajdonos bejelentkezett dashboard-sessionje jelölhet ismétlődő sablont' }, 403); return true
       }
     }
-    if (updateKanbanCard(id, data, Object.hasOwn(data, 'is_recurring_template') ? auth?.user : undefined)) { json(res, { ok: true }); return true }
+    if (updateKanbanCard(id, data, recurringTemplateChanging ? auth?.user : undefined)) { json(res, { ok: true }); return true }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
   }

@@ -83,6 +83,39 @@ describe('recurring Kanban templates', () => {
     expect(getKanbanRecurringTemplateEvents('weekly')).toMatchObject([{ card_id: 'weekly', from_value: 0, to_value: 1, actor }])
   })
 
+  it('does not require owner auth for a non-owner edit that resends the unchanged current value (the edit form always includes this field)', async () => {
+    createKanbanCard({ id: 'untouched', title: 'Not a recurring template', assignee: 'bela' })
+    const stillFalse = fakeCtx('/api/kanban/untouched', 'PUT', { title: 'Renamed by anyone', is_recurring_template: false }, { kind: 'token' })
+    expect(await tryHandleKanban(stillFalse.ctx)).toBe(true)
+    expect(stillFalse.out.status).toBe(200)
+    expect(getKanbanCard('untouched')?.title).toBe('Renamed by anyone')
+    expect(getKanbanCard('untouched')?.is_recurring_template).toBe(0)
+    expect(getKanbanRecurringTemplateEvents('untouched')).toEqual([])
+
+    createDashboardUser(OWNER_USERNAME, 'not-used-in-this-db-test')
+    createKanbanCard({ id: 'already-recurring', title: 'Weekly container', is_recurring_template: true }, OWNER_USERNAME)
+    const stillTrue = fakeCtx('/api/kanban/already-recurring', 'PUT', { title: 'Renamed by anyone else', is_recurring_template: true }, { kind: 'token' })
+    expect(await tryHandleKanban(stillTrue.ctx)).toBe(true)
+    expect(stillTrue.out.status).toBe(200)
+    expect(getKanbanCard('already-recurring')?.title).toBe('Renamed by anyone else')
+    expect(getKanbanCard('already-recurring')?.is_recurring_template).toBe(1)
+  })
+
+  it('still requires owner auth for an actual false->true or true->false transition', async () => {
+    createKanbanCard({ id: 'toggle-on', title: 'Not yet a template', assignee: 'bela' })
+    const turnOn = fakeCtx('/api/kanban/toggle-on', 'PUT', { is_recurring_template: true }, { kind: 'token' })
+    expect(await tryHandleKanban(turnOn.ctx)).toBe(true)
+    expect(turnOn.out.status).toBe(403)
+    expect(getKanbanCard('toggle-on')?.is_recurring_template).toBe(0)
+
+    createDashboardUser(OWNER_USERNAME, 'not-used-in-this-db-test')
+    createKanbanCard({ id: 'toggle-off', title: 'A template', is_recurring_template: true }, OWNER_USERNAME)
+    const turnOff = fakeCtx('/api/kanban/toggle-off', 'PUT', { is_recurring_template: false }, { kind: 'token' })
+    expect(await tryHandleKanban(turnOff.ctx)).toBe(true)
+    expect(turnOff.out.status).toBe(403)
+    expect(getKanbanCard('toggle-off')?.is_recurring_template).toBe(1)
+  })
+
   it('rejects truthy non-boolean values', async () => {
     createDashboardUser(OWNER_USERNAME, 'not-used-in-this-db-test')
     createKanbanCard({ id: 'typed', title: 'Typed', assignee: 'bela' })
