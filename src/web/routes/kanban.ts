@@ -15,7 +15,6 @@ import {
   countNewHotMemories,
   countPlannedKanbanCards,
   getDbFileSizeMb,
-  isDashboardUserOwner,
 } from '../../db.js'
 import { normalizeKanbanRefs } from '../kanban-ref-normalize.js'
 import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID, STORE_DIR, WEB_HOST, WEB_PORT, KANBAN_LABEL_COLORS } from '../../config.js'
@@ -28,13 +27,25 @@ import { readBody, json, jsonMaybeGzip } from '../http-helpers.js'
 import { getEffectiveSettingValue } from '../../settings-store.js'
 import type { RouteContext } from './types.js'
 
-/** A token/device/federation credential is never sufficient for this flag. */
-export function mayManageRecurringTemplate(auth: RouteContext['auth']): boolean {
-  return auth?.kind === 'session' && typeof auth.user === 'string' && isDashboardUserOwner(auth.user)
-}
-
 function recurringTemplateFieldIsValid(value: unknown): value is boolean {
   return typeof value === 'boolean'
+}
+
+// Istvan's explicit call (2026-09-23): no authorization is required to mark a
+// card as a durable recurring template -- the owner-session-only gate this
+// used to have made even the owner's own browser unable to use it in
+// practice, and he'd rather have the flag open than fight a login flow. The
+// actor is still recorded on every actual value change purely for audit
+// visibility, not as an access control.
+function describeAuthActor(auth: RouteContext['auth']): string {
+  if (!auth) return 'unknown'
+  switch (auth.kind) {
+    case 'session': return auth.user ?? 'unknown-session'
+    case 'device': return `device:${auth.device ?? 'unknown'}`
+    case 'federation': return `federation:${auth.peer ?? 'unknown'}`
+    case 'token': return 'shared-token'
+    default: return 'unknown'
+  }
 }
 
 // A headless agent cannot "drag" a card to done, so the dispatch hands it the
@@ -329,21 +340,11 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'A kártya adatai objektumként szükségesek' }, 400); return true
     }
     const wantsRecurringTemplate = Object.hasOwn(data, 'is_recurring_template') && !!data.is_recurring_template
-    if (Object.hasOwn(data, 'is_recurring_template')) {
-      if (!recurringTemplateFieldIsValid(data.is_recurring_template)) {
-        json(res, { error: 'is_recurring_template boolean mező kell legyen' }, 400); return true
-      }
-      // A new card defaults to is_recurring_template=false, so only an
-      // explicit true is an actual "set the flag" action requiring the
-      // owner check -- the UI form always includes this field on every
-      // save, so false must stay a no-op for every non-owner caller.
-      if (wantsRecurringTemplate && !mayManageRecurringTemplate(auth)) {
-        logger.warn({ authKind: auth?.kind ?? 'none' }, 'Kanban recurring-template create rejected for non-owner principal')
-        json(res, { error: 'Csak a tulajdonos bejelentkezett dashboard-sessionje jelölhet ismétlődő sablont' }, 403); return true
-      }
+    if (Object.hasOwn(data, 'is_recurring_template') && !recurringTemplateFieldIsValid(data.is_recurring_template)) {
+      json(res, { error: 'is_recurring_template boolean mező kell legyen' }, 400); return true
     }
     const id = randomUUID().slice(0, 8)
-    createKanbanCard({ id, ...data }, wantsRecurringTemplate ? auth?.user : undefined)
+    createKanbanCard({ id, ...data }, wantsRecurringTemplate ? describeAuthActor(auth) : undefined)
     json(res, { ok: true, id })
     return true
   }
@@ -361,19 +362,15 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       if (!recurringTemplateFieldIsValid(data.is_recurring_template)) {
         json(res, { error: 'is_recurring_template boolean mező kell legyen' }, 400); return true
       }
-      // The card-edit UI form always includes this field on every save, not
-      // just when the user actually touches the checkbox -- so the owner
-      // check must only fire when the value genuinely differs from what's
-      // already stored, or every routine edit by anyone else would 403.
+      // No authorization is required to flip this flag (Istvan, 2026-09-23).
+      // Still only audit-log an actual value change, not every resend of the
+      // unchanged current value -- the card-edit form always includes this
+      // field on every save, whether the user touched it or not.
       const existing = getKanbanCard(id)
       const currentValue = !!existing?.is_recurring_template
       recurringTemplateChanging = !!data.is_recurring_template !== currentValue
-      if (recurringTemplateChanging && !mayManageRecurringTemplate(auth)) {
-        logger.warn({ id, authKind: auth?.kind ?? 'none' }, 'Kanban recurring-template update rejected for non-owner principal')
-        json(res, { error: 'Csak a tulajdonos bejelentkezett dashboard-sessionje jelölhet ismétlődő sablont' }, 403); return true
-      }
     }
-    if (updateKanbanCard(id, data, recurringTemplateChanging ? auth?.user : undefined)) { json(res, { ok: true }); return true }
+    if (updateKanbanCard(id, data, recurringTemplateChanging ? describeAuthActor(auth) : undefined)) { json(res, { ok: true }); return true }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
   }

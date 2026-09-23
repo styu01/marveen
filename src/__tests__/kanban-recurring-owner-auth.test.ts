@@ -3,12 +3,15 @@ import Database from 'better-sqlite3'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createDashboardUser, getDb, initDatabase, isDashboardUserOwner } from '../db.js'
-import { mayManageRecurringTemplate } from '../web/routes/kanban.js'
+import { getDb, initDatabase } from '../db.js'
 
 beforeEach(() => initDatabase(':memory:'))
 
-describe('recurring template owner authority', () => {
+// The is_owner column and its migration are left in place as unused-but-
+// harmless infrastructure after Istvan removed the recurring-template
+// authorization gate (2026-09-23) -- kept tested since a future feature
+// may still want a real "who is the dashboard owner" signal.
+describe('dashboard_users.is_owner migration', () => {
   it('migrates legacy users by nominating exactly the earliest user, never all users', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dashboard-owner-migration-'))
     const file = join(dir, 'legacy.db')
@@ -26,31 +29,5 @@ describe('recurring template owner authority', () => {
       expect(getDb().prepare('SELECT username, is_owner FROM dashboard_users ORDER BY id').all())
         .toEqual([{ username: 'styu01', is_owner: 1 }, { username: 'second-user', is_owner: 0 }])
     } finally { rmSync(dir, { recursive: true, force: true }) }
-  })
-
-  it('accepts the realistic existing owner session username (styu01), not OWNER_NAME', () => {
-    createDashboardUser('styu01', 'not-used-in-this-db-test')
-
-    expect(isDashboardUserOwner('styu01')).toBe(true)
-    expect(mayManageRecurringTemplate({ kind: 'session', user: 'styu01' })).toBe(true)
-  })
-
-  it('rejects a second, non-owner dashboard session', () => {
-    createDashboardUser('styu01', 'not-used-in-this-db-test')
-    createDashboardUser('second-user', 'not-used-in-this-db-test')
-
-    expect(isDashboardUserOwner('styu01')).toBe(true)
-    expect(isDashboardUserOwner('second-user')).toBe(false)
-    expect(mayManageRecurringTemplate({ kind: 'session', user: 'second-user' })).toBe(false)
-  })
-
-  it('rejects a disabled owner and every non-session credential', () => {
-    createDashboardUser('styu01', 'not-used-in-this-db-test')
-    getDb().prepare("UPDATE dashboard_users SET disabled=1 WHERE username='styu01'").run()
-
-    expect(mayManageRecurringTemplate({ kind: 'session', user: 'styu01' })).toBe(false)
-    expect(mayManageRecurringTemplate({ kind: 'token' })).toBe(false)
-    expect(mayManageRecurringTemplate({ kind: 'device', device: 'phone' })).toBe(false)
-    expect(mayManageRecurringTemplate({ kind: 'federation', peer: 'bela' })).toBe(false)
   })
 })
